@@ -1,0 +1,79 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Development overrides — auto-merged by Docker Compose when you run
+# `docker compose up` without specifying a -f flag.
+#
+# Key differences from production:
+#   - Python services bind-mount src/ so code changes reload without rebuild
+#   - uvicorn runs with --reload flag
+#   - React runs Vite dev server with HMR instead of nginx
+#   - node_modules stored in anonymous volume (not on host — faster on Mac)
+#
+# When you edit a Python file → uvicorn detects the change → restarts in ~1s
+# When you edit a React file  → Vite HMR updates the browser in milliseconds
+# When you edit packages/models → run: docker compose build account-api txgen-api
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  account-api:
+    build:
+      target: builder          # use the builder stage which has dev tools
+    volumes:
+      # Bind-mount source — edits on host appear instantly inside container
+      - ./services/account-api/src:/app/src
+      # Shared packages also mounted so model changes reflect immediately
+      - ./packages:/app/packages
+    command: >
+      uvicorn src.main:app
+      --host 0.0.0.0
+      --port 8001
+      --reload
+      --reload-dir /app/src
+      --reload-dir /app/packages
+
+  txgen-api:
+    build:
+      target: builder
+    volumes:
+      - ./services/txgen-api/src:/app/src
+      - ./packages:/app/packages
+    command: >
+      uvicorn src.main:app
+      --host 0.0.0.0
+      --port 8002
+      --reload
+      --reload-dir /app/src
+      --reload-dir /app/packages
+
+  mongo-consumer:
+    build:
+      target: builder
+    volumes:
+      - ./services/mongo-consumer/src:/app/src
+      - ./packages:/app/packages
+
+  integrity-checker:
+    build:
+      target: builder
+    volumes:
+      - ./services/integrity-checker/src:/app/src
+      - ./packages:/app/packages
+
+  rag-processor:
+    build:
+      target: builder
+    volumes:
+      - ./services/rag-processor/src:/app/src
+      - ./packages:/app/packages
+
+  generator-ui:
+    build:
+      target: dev
+    volumes:
+      # Entire UI mounted — Vite watches for changes
+      - ./apps/generator-ui:/app
+      # node_modules in anonymous volume — prevents host filesystem conflicts
+      # especially important on macOS where host filesystem is slow
+      - /app/node_modules

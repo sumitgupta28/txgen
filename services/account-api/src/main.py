@@ -1,0 +1,81 @@
+"""
+services/account-api/src/main.py
+
+FastAPI application entry point for the Account Generator service.
+
+CORS configuration is the most important thing to get right here.
+Without allow_credentials=True and the explicit origin, the browser
+will silently strip the session cookie from every request — the single
+most common mistake when building a BFF with cookie-based auth.
+"""
+
+import os
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from .routers import auth, seed
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown logic for the FastAPI application."""
+    # Nothing to initialise at startup for now.
+    # The Redis client in auth.py is created at module import time.
+    # MongoDB and Kafka connections are created per-request in routers.
+    yield
+    # Cleanup on shutdown (graceful container stop)
+
+
+app = FastAPI(
+    title="TxGen Account Generator API",
+    description=(
+        "Manages account seeding and authentication. "
+        "Uses the BFF pattern — React only calls this service. "
+        "Keycloak is never exposed to the browser."
+    ),
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# ── CORS ─────────────────────────────────────────────────────────────────────
+#
+# Three settings work together to make cookie-based auth work cross-origin:
+#
+# allow_origins:       Must list the exact React origin — NOT "*".
+#                      Wildcards cannot be combined with allow_credentials.
+#
+# allow_credentials:   True tells the browser it's allowed to send and receive
+#                      cookies on cross-origin requests. Without this, the browser
+#                      silently strips the session cookie from every API call.
+#
+# allow_headers:       Must include Content-Type for POST with JSON body.
+#
+# This CORS config only matters in development because React (port 5173) and
+# FastAPI (port 8001) are on different ports — treated as different origins.
+# In production behind nginx/ALB on the same domain, CORS is irrelevant.
+
+origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,         # ← essential for cookie-based BFF auth
+    allow_methods=["*"],
+    allow_headers=["Content-Type", "Accept"],
+)
+
+# ── Routers ───────────────────────────────────────────────────────────────────
+
+app.include_router(auth.router)
+app.include_router(seed.router)
+
+
+@app.get("/health")
+async def health() -> dict:
+    """
+    Health check endpoint for Docker healthcheck and load balancers.
+    Returns 200 if the service is running — does not check downstream deps.
+    """
+    return {"status": "ok", "service": "account-api"}

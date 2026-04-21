@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "txgen-iso-mapper"
+version = "1.0.0"
+description = "ISO 8583 DE field mapping and validation for TxGen services"
+requires-python = ">=3.12"
+
+dependencies = [
+    "txgen-models @ file:///app/packages/models",
+    "python-jose[cryptography]>=3.3.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/iso_mapper"]

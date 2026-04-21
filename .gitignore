@@ -1,0 +1,25 @@
+# Environment — never commit real credentials
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+apps/generator-ui/dist/
+
+# Docker volumes (local data)
+.docker-data/
+
+# IDE
+.vscode/
+.idea/
+*.swp

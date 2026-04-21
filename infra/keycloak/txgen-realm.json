@@ -1,0 +1,99 @@
+{
+  "realm": "txgen",
+  "displayName": "TxGen Platform",
+  "enabled": true,
+
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": true,
+  "loginWithEmailAllowed": false,
+
+  "accessTokenLifespan": 900,
+  "ssoSessionMaxLifespan": 86400,
+  "ssoSessionIdleTimeout": 3600,
+
+  "roles": {
+    "realm": [
+      { "name": "admin",    "description": "Full access — seed, scenarios, dashboards" },
+      { "name": "operator", "description": "Run scenarios and view dashboards" },
+      { "name": "viewer",   "description": "Read-only — dashboards and event feed" }
+    ]
+  },
+
+  "clients": [
+    {
+      "clientId": "txgen-backend",
+      "name": "TxGen Backend (FastAPI)",
+      "description": "Confidential client used by FastAPI services to authenticate users via ROPC. Never exposed to the browser.",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "${KEYCLOAK_CLIENT_SECRET}",
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "attributes": {
+        "access.token.lifespan": "900",
+        "client.session.max.lifespan": "86400"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles mapper",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "multivalued": "true"
+          }
+        }
+      ]
+    }
+  ],
+
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "credentials": [{ "type": "password", "value": "admin123", "temporary": false }],
+      "realmRoles": ["admin"]
+    },
+    {
+      "username": "operator_alice",
+      "firstName": "Alice",
+      "lastName": "Operator",
+      "email": "alice@txgen.local",
+      "enabled": true,
+      "credentials": [{ "type": "password", "value": "operator123", "temporary": false }],
+      "realmRoles": ["operator"]
+    },
+    {
+      "username": "operator_bob",
+      "firstName": "Bob",
+      "lastName": "Operator",
+      "email": "bob@txgen.local",
+      "enabled": true,
+      "credentials": [{ "type": "password", "value": "operator123", "temporary": false }],
+      "realmRoles": ["operator"]
+    },
+    {
+      "username": "viewer_carol",
+      "firstName": "Carol",
+      "lastName": "Viewer",
+      "email": "carol@txgen.local",
+      "enabled": true,
+      "credentials": [{ "type": "password", "value": "viewer123", "temporary": false }],
+      "realmRoles": ["viewer"]
+    },
+    {
+      "username": "viewer_dan",
+      "firstName": "Dan",
+      "lastName": "Viewer",
+      "email": "dan@txgen.local",
+      "enabled": true,
+      "credentials": [{ "type": "password", "value": "viewer123", "temporary": false }],
+      "realmRoles": ["viewer"]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+FROM python:3.12-slim
+WORKDIR /app
+RUN pip install alembic sqlalchemy psycopg2-binary --quiet
+COPY infra/timescaledb/alembic.ini .
+COPY infra/timescaledb/migrations ./migrations
+CMD ["alembic", "upgrade", "head"]

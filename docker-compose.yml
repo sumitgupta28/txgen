@@ -1,0 +1,286 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TxGen Platform — Docker Compose (base configuration)
+#
+# Three-file Compose strategy:
+#   docker-compose.yml          ← this file (production-like defaults)
+#   docker-compose.override.yml ← auto-merged in dev (hot reload, bind mounts)
+#   docker-compose.test.yml     ← isolated test environment
+#
+# Startup dependency chain (strict ordering via healthchecks):
+#   Infrastructure → Keycloak → Redis → db-migrations → App services
+#
+# Port map (host → container):
+#   5173  generator-ui   React + Vite dev server
+#   8001  account-api    FastAPI — Account Generator
+#   8002  txgen-api      FastAPI — Transaction Generator
+#   8080  keycloak       Identity provider
+#   8090  kafka-ui       Kafka topic browser (8090 avoids conflict with keycloak)
+#   3000  grafana        Dashboards
+#   27017 mongodb        Direct DB access (dev only)
+#   5432  timescaledb    Direct DB access (dev only)
+#   9092  kafka          Kafka broker (host access for local tools)
+#   6379  redis          Session store (dev access)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks: [txgen-net]
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      zookeeper: { condition: service_healthy }
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Two listeners: internal (container-to-container) and external (host tools)
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168        # 7 days
+    networks: [txgen-net]
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      retries: 10
+      start_period: 20s
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    depends_on:
+      kafka: { condition: service_healthy }
+    ports: ["8090:8080"]               # 8090 on host — avoids clash with keycloak:8080
+    environment:
+      KAFKA_CLUSTERS_0_NAME: txgen-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    networks: [txgen-net]
+
+  mongodb:
+    image: mongo:7.0
+    ports: ["27017:27017"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: txgen
+      MONGO_INITDB_ROOT_PASSWORD: txgen
+      MONGO_INITDB_DATABASE: banking_db
+    volumes:
+      - mongo-data:/data/db
+      # mongo-init.js creates indexes and validation rules on first boot
+      - ./infra/mongo/mongo-init.js:/docker-entrypoint-initdb.d/init.js
+    networks: [txgen-net]
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      retries: 10
+
+  timescaledb:
+    image: timescale/timescaledb-ha:pg16-latest
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: txgen
+      POSTGRES_PASSWORD: txgen
+      POSTGRES_DB: txgen
+    volumes: [tsdb-data:/home/postgres/pgdata/data]
+    networks: [txgen-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U txgen"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    # appendonly yes ensures sessions survive container restarts in dev
+    command: redis-server --appendonly yes
+    volumes: [redis-data:/data]
+    networks: [txgen-net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  # ── Identity provider ────────────────────────────────────────────────────────
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    # start-dev: no TLS required (fine for Docker-internal traffic)
+    # --import-realm: loads txgen-realm.json automatically on every start
+    command: start-dev --import-realm
+    ports: ["8080:8080"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      # dev-mem: in-memory H2 DB — fast startup, no persistence needed
+      # because everything is re-imported from txgen-realm.json anyway
+      KC_DB: dev-mem
+    volumes:
+      - ./infra/keycloak/txgen-realm.json:/opt/keycloak/data/import/txgen-realm.json
+    networks: [txgen-net]
+    healthcheck:
+      # /realms/txgen must exist before FastAPI services try to use it
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/txgen > /dev/null"]
+      interval: 10s
+      retries: 15
+      start_period: 40s      # Keycloak JVM startup takes longer than other services
+
+  # ── One-shot migration container ─────────────────────────────────────────────
+
+  db-migrations:
+    build:
+      context: .
+      dockerfile: infra/timescaledb/Dockerfile.migrations
+    environment:
+      DATABASE_URL: postgresql+asyncpg://txgen:txgen@timescaledb:5432/txgen
+    depends_on:
+      timescaledb: { condition: service_healthy }
+    networks: [txgen-net]
+    # restart: "no" ensures this container runs once and exits cleanly
+    restart: "no"
+
+  # ── Application services ─────────────────────────────────────────────────────
+
+  account-api:
+    build:
+      context: .
+      dockerfile: services/account-api/Dockerfile
+    ports: ["8001:8001"]
+    environment:
+      # Database connections use container names — not localhost
+      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
+      KAFKA_BROKERS: kafka:29092
+      # Keycloak — container-to-container URL (FastAPI talks to Keycloak)
+      # The browser NEVER uses this URL — it only knows about FastAPI
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: txgen
+      KEYCLOAK_CLIENT_ID: txgen-backend
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      REDIS_URL: redis://redis:6379
+      # CORS: allow the React dev server to make credentialed requests
+      CORS_ORIGINS: "http://localhost:5173"
+    depends_on:
+      keycloak:      { condition: service_healthy }
+      redis:         { condition: service_healthy }
+      mongodb:       { condition: service_healthy }
+      kafka:         { condition: service_healthy }
+      db-migrations: { condition: service_completed_successfully }
+    networks: [txgen-net]
+
+  txgen-api:
+    build:
+      context: .
+      dockerfile: services/txgen-api/Dockerfile
+    ports: ["8002:8002"]
+    environment:
+      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
+      KAFKA_BROKERS: kafka:29092
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: txgen
+      KEYCLOAK_CLIENT_ID: txgen-backend
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGINS: "http://localhost:5173"
+    depends_on:
+      keycloak:      { condition: service_healthy }
+      redis:         { condition: service_healthy }
+      mongodb:       { condition: service_healthy }
+      kafka:         { condition: service_healthy }
+      db-migrations: { condition: service_completed_successfully }
+    networks: [txgen-net]
+
+  mongo-consumer:
+    build:
+      context: .
+      dockerfile: services/mongo-consumer/Dockerfile
+    environment:
+      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_GROUP_ID: mongo-writer-group
+    depends_on:
+      mongodb: { condition: service_healthy }
+      kafka:   { condition: service_healthy }
+      db-migrations: { condition: service_completed_successfully }
+    networks: [txgen-net]
+    # restart on failure — consumer must always be running
+    restart: unless-stopped
+
+  integrity-checker:
+    build:
+      context: .
+      dockerfile: services/integrity-checker/Dockerfile
+    environment:
+      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_GROUP_ID: integrity-checker-group
+    depends_on:
+      mongodb: { condition: service_healthy }
+      kafka:   { condition: service_healthy }
+    networks: [txgen-net]
+    restart: unless-stopped
+
+  rag-processor:
+    build:
+      context: .
+      dockerfile: services/rag-processor/Dockerfile
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_GROUP_ID: rag-processor-group
+      DATABASE_URL: postgresql+asyncpg://txgen:txgen@timescaledb:5432/txgen
+    depends_on:
+      timescaledb:   { condition: service_healthy }
+      kafka:         { condition: service_healthy }
+      db-migrations: { condition: service_completed_successfully }
+    networks: [txgen-net]
+    restart: unless-stopped
+
+  generator-ui:
+    build:
+      context: .
+      dockerfile: apps/generator-ui/Dockerfile
+      target: dev
+    ports: ["5173:5173"]
+    environment:
+      # These are the ONLY URLs React knows about — FastAPI, not Keycloak
+      VITE_ACCOUNT_API_URL: http://localhost:8001
+      VITE_TXGEN_API_URL: http://localhost:8002
+    depends_on:
+      - account-api
+      - txgen-api
+    networks: [txgen-net]
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: grafana-clock-panel
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      timescaledb: { condition: service_healthy }
+    networks: [txgen-net]
+
+networks:
+  txgen-net:
+    driver: bridge
+
+volumes:
+  mongo-data:
+  tsdb-data:
+  redis-data:
+  grafana-data:
