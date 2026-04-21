@@ -62,9 +62,14 @@ def validate_pan_bin(pan: str, scheme: str) -> bool:
 
     validator = rules.get(scheme.lower())
     if not validator:
+        logger.debug("BIN validation skipped: unknown scheme | scheme=%s", scheme)
         return True   # unknown scheme — allow through
 
     try:
-        return validator(bin_prefix)
+        result = validator(bin_prefix)
+        if not result:
+            logger.debug("BIN validation failed | scheme=%s bin=%s", scheme, bin_prefix)
+        return result
     except ValueError:
+        logger.debug("BIN validation error: non-numeric BIN | scheme=%s bin=%r", scheme, bin_prefix)
         return False
