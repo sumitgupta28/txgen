@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Development overrides — auto-merged by Docker Compose when you run
 # `docker compose up` without specifying a -f flag.

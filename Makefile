@@ -38,7 +38,7 @@ build:
 
 ## Rebuild a specific service: make build-svc SVC=account-api
 build-svc:
-	docker compose build $(SVC) account-api txgen-api
+	docker compose build $(SVC)
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 

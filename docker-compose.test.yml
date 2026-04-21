@@ -1,0 +1,101 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# TxGen Platform — Test environment
+#
+# Runs isolated unit + integration tests. Use via:
+#   make test-integration
+#
+# Differences from docker-compose.yml:
+#   - No Keycloak, Grafana, or kafka-ui (not needed for tests)
+#   - Services use TEST_ prefixed databases to avoid polluting dev data
+#   - All containers exit when tests complete (--abort-on-container-exit)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Infrastructure (minimal set for tests) ──────────────────────────────────
+
+  zookeeper-test:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks: [test-net]
+    healthcheck:
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+      interval: 10s
+      retries: 5
+
+  kafka-test:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      zookeeper-test: { condition: service_healthy }
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper-test:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-test:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks: [test-net]
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      retries: 10
+      start_period: 20s
+
+  mongodb-test:
+    image: mongo:7.0
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: txgen
+      MONGO_INITDB_ROOT_PASSWORD: txgen
+      MONGO_INITDB_DATABASE: banking_db_test
+    networks: [test-net]
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      retries: 10
+
+  timescaledb-test:
+    image: timescale/timescaledb-ha:pg16-all
+    environment:
+      POSTGRES_USER: txgen
+      POSTGRES_PASSWORD: txgen
+      POSTGRES_DB: txgen_test
+    networks: [test-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U txgen"]
+      interval: 5s
+      retries: 10
+
+  redis-test:
+    image: redis:7-alpine
+    networks: [test-net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  # ── Test runner ──────────────────────────────────────────────────────────────
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: services/account-api/Dockerfile
+      target: builder
+    environment:
+      MONGO_URL: mongodb://txgen:txgen@mongodb-test:27017/banking_db_test
+      KAFKA_BROKERS: kafka-test:29092
+      REDIS_URL: redis://redis-test:6379
+      DATABASE_URL: postgresql+asyncpg://txgen:txgen@timescaledb-test:5432/txgen_test
+    depends_on:
+      mongodb-test:     { condition: service_healthy }
+      kafka-test:       { condition: service_healthy }
+      redis-test:       { condition: service_healthy }
+      timescaledb-test: { condition: service_healthy }
+    networks: [test-net]
+    command: pytest /app/tests -v --tb=short
+
+networks:
+  test-net:
+    driver: bridge

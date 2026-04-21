@@ -1,5 +1,3 @@
-version: "3.9"
-
 # ─────────────────────────────────────────────────────────────────────────────
 # TxGen Platform — Docker Compose (base configuration)
 #
@@ -62,7 +60,7 @@ services:
       start_period: 20s
 
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
+    image: provectuslabs/kafka-ui:v0.7.2
     depends_on:
       kafka: { condition: service_healthy }
     ports: ["8090:8080"]               # 8090 on host — avoids clash with keycloak:8080
@@ -126,14 +124,16 @@ services:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
       KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
-      KC_DB_USERNAME: postgres
-      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      KC_DB_URL: jdbc:postgresql://timescaledb:5432/txgen
+      KC_DB_USERNAME: txgen
+      KC_DB_PASSWORD: txgen
       KC_HOSTNAME_STRICT: false
       KC_HTTP_ENABLED: true
-      KC_LOG_LEVEL: DEBUG
+      KC_LOG_LEVEL: INFO
     volumes:
       - ./infra/keycloak/txgen-realm.json:/opt/keycloak/data/import/txgen-realm.json
+    depends_on:
+      timescaledb: { condition: service_healthy }
     networks: [txgen-net]
     healthcheck:
       # /realms/txgen must exist before FastAPI services try to use it
