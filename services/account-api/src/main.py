@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pyctuator.pyctuator import Pyctuator
 
 from .routers import auth, seed
 
@@ -73,6 +74,17 @@ app.add_middleware(
     allow_credentials=True,         # ← essential for cookie-based BFF auth
     allow_methods=["*"],
     allow_headers=["Content-Type", "Accept"],
+)
+
+# ── Actuator ─────────────────────────────────────────────────────────────────
+
+_app_url = os.getenv("APP_URL", "http://localhost:8001")
+Pyctuator(
+    app=app,
+    app_name="TxGen Account API",
+    app_url=_app_url,
+    pyctuator_endpoint_url=f"{_app_url}/actuator",
+    registration_url=os.getenv("SPRING_BOOT_ADMIN_URL"),
 )
 
 # ── Routers ───────────────────────────────────────────────────────────────────

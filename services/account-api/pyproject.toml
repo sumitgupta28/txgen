@@ -34,6 +34,9 @@ dependencies = [
 
     # JWT decoding
     "python-jose[cryptography]>=3.3.0",
+
+    # Actuator endpoints (health, info, metrics, env, loggers)
+    "pyctuator>=1.2.0",
 ]
 
 [tool.hatch.build.targets.wheel]

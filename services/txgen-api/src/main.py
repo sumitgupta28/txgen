@@ -34,6 +34,7 @@ from fastapi import (
 )
 from fastapi import Depends
 from fastapi.middleware.cors import CORSMiddleware
+from pyctuator.pyctuator import Pyctuator
 from pymongo import MongoClient
 from pydantic import BaseModel
 
@@ -104,6 +105,17 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["Content-Type", "Accept"],
+)
+
+# ── Actuator ─────────────────────────────────────────────────────────────────
+
+_app_url = os.getenv("APP_URL", "http://localhost:8002")
+Pyctuator(
+    app=app,
+    app_name="TxGen Transaction Generator API",
+    app_url=_app_url,
+    pyctuator_endpoint_url=f"{_app_url}/actuator",
+    registration_url=os.getenv("SPRING_BOOT_ADMIN_URL"),
 )
 
 # Re-use the auth router from account-api — both services expose the same
