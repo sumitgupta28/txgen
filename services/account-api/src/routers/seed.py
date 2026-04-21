@@ -9,9 +9,13 @@ This clean separation is the payoff of centralising auth in models/auth.py.
 """
 
 import asyncio
+import logging
+
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, Query
 from models.auth import SessionData, require_role, get_ws_session
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/seed", tags=["seed"])
 
@@ -48,11 +52,13 @@ async def start_seed(
 ) -> dict:
     global _seed_task
     if _seed_task and not _seed_task.done():
+        logger.warning("Seed already running | initiated_by=%s", session.username)
         return {"status": "already_running"}
 
-    # Log who triggered the seed — useful for audit trails
-    print(f"Seed started by: {session.username}")
-
+    logger.info(
+        "Seed started | initiated_by=%s cardholders=%d accounts_per_holder=%s cards_per_account=%s",
+        session.username, config.cardholders, config.accounts_per_holder, config.cards_per_account,
+    )
     _seed_task = asyncio.create_task(_run_seed(config))
     return {"status": "started", "initiated_by": session.username}
 
@@ -89,20 +95,23 @@ async def seed_progress_ws(
     try:
         session = await get_ws_session(session_id)
     except Exception:
+        logger.warning("WS /seed/ws/progress: invalid session | session=%s...", session_id[:8])
         await websocket.close(code=1008)  # 1008 = Policy Violation
         return
 
     if "admin" not in session.roles and "operator" not in session.roles:
+        logger.warning("WS /seed/ws/progress: insufficient role | user=%s roles=%s", session.username, session.roles)
         await websocket.close(code=1008)
         return
 
+    logger.info("WS /seed/ws/progress connected | user=%s", session.username)
     await websocket.accept()
     try:
         while True:
             await websocket.send_json(_seed_progress)
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
-        pass
+        logger.info("WS /seed/ws/progress disconnected | user=%s", session.username)
 
 
 async def _run_seed(config: SeedConfig) -> None:
@@ -117,6 +126,7 @@ async def _run_seed(config: SeedConfig) -> None:
     ]
 
     for phase, total in phases:
+        logger.info("Seed phase started | phase=%s total=%d", phase, total)
         _seed_progress = {"phase": phase, "count": 0, "total": total}
         # TODO: replace with real MongoDB writes + Kafka publishes
         # using services/seeder.py which imports pymongo and confluent_kafka
@@ -125,5 +135,7 @@ async def _run_seed(config: SeedConfig) -> None:
             _seed_progress["count"] = min(
                 _seed_progress["count"] + 20, total
             )
+        logger.info("Seed phase complete | phase=%s total=%d", phase, total)
 
     _seed_progress = {"phase": "complete", "count": 0, "total": 0}
+    logger.info("Seed run complete")

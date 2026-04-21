@@ -14,6 +14,8 @@ Endpoint summary:
   POST /api/auth/refresh → Explicit session keepalive (rarely needed)
 """
 
+import logging
+
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from models.auth import (
     LoginRequest,
@@ -26,6 +28,7 @@ from models.auth import (
     get_current_session,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
@@ -44,6 +47,8 @@ async def login(
     credentials: LoginRequest,
     response: Response,
 ) -> UserInfo:
+    logger.info("POST /api/auth/login | user=%s", credentials.username)
+
     # Step 1: Call Keycloak server-to-server (container-to-container inside Docker).
     # If credentials are wrong, Keycloak returns 401 and we raise HTTPException(401).
     # The browser never knows Keycloak exists — it only sees our 401.
@@ -58,6 +63,7 @@ async def login(
 
     # Step 3: Return only display data — NO tokens in this response body.
     # The cookie is set via the response object (Set-Cookie header), not the body.
+    logger.info("Login complete | user=%s display=%r roles=%s", user_info.username, user_info.display_name, user_info.roles)
     return user_info
 
 
@@ -75,6 +81,8 @@ async def logout(
     session_id: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
     session: SessionData = Depends(get_current_session),
 ) -> dict:
+    logger.info("POST /api/auth/logout | user=%s session=%s...", session.username, (session_id or "")[:8])
+
     # Delete from Redis and notify Keycloak. Even if Keycloak is unavailable,
     # the Redis deletion means our system treats this session as gone.
     await delete_session(session_id, session)
@@ -87,6 +95,7 @@ async def logout(
         samesite="strict",
     )
 
+    logger.info("Logout complete | user=%s", session.username)
     return {"message": "Logged out successfully"}
 
 
@@ -103,6 +112,7 @@ async def logout(
 async def me(
     session: SessionData = Depends(get_current_session),
 ) -> UserInfo:
+    logger.debug("GET /api/auth/me | user=%s roles=%s", session.username, session.roles)
     # get_current_session() already validated and potentially refreshed the session.
     # We just return the user-facing fields — still no tokens.
     return UserInfo(
@@ -125,6 +135,7 @@ async def me(
 async def refresh(
     session: SessionData = Depends(get_current_session),
 ) -> UserInfo:
+    logger.debug("POST /api/auth/refresh | user=%s roles=%s", session.username, session.roles)
     # get_current_session() already performed the refresh if needed.
     # This endpoint exists mainly as a polling target for keepalive.
     return UserInfo(

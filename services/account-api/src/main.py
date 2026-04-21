@@ -9,6 +9,7 @@ will silently strip the session cookie from every request — the single
 most common mistake when building a BFF with cookie-based auth.
 """
 
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -17,15 +18,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .routers import auth, seed
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s | %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%SZ",
+)
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown logic for the FastAPI application."""
-    # Nothing to initialise at startup for now.
+    logger.info("account-api starting up | version=%s", app.version)
     # The Redis client in auth.py is created at module import time.
     # MongoDB and Kafka connections are created per-request in routers.
     yield
-    # Cleanup on shutdown (graceful container stop)
+    logger.info("account-api shutting down")
 
 
 app = FastAPI(
@@ -57,6 +65,7 @@ app = FastAPI(
 # In production behind nginx/ALB on the same domain, CORS is irrelevant.
 
 origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")]
+logger.info("CORS allowed origins | origins=%s", origins)
 
 app.add_middleware(
     CORSMiddleware,
@@ -78,4 +87,5 @@ async def health() -> dict:
     Health check endpoint for Docker healthcheck and load balancers.
     Returns 200 if the service is running — does not check downstream deps.
     """
+    logger.debug("Health check requested")
     return {"status": "ok", "service": "account-api"}

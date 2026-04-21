@@ -4,6 +4,11 @@ packages/iso_mapper/src/iso_mapper/validators.py
 Utility validators for ISO 8583 field content.
 """
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 def luhn_check(card_number: str) -> bool:
     """
     Validate a PAN using the Luhn algorithm.
@@ -18,6 +23,7 @@ def luhn_check(card_number: str) -> bool:
     """
     digits = [int(d) for d in card_number if d.isdigit()]
     if len(digits) < 13:
+        logger.debug("Luhn check failed: too short | length=%d", len(digits))
         return False
 
     # Process from right to left, doubling every second digit
@@ -29,7 +35,10 @@ def luhn_check(card_number: str) -> bool:
                 digit -= 9
         total += digit
 
-    return total % 10 == 0
+    valid = total % 10 == 0
+    if not valid:
+        logger.debug("Luhn check failed | pan_suffix=%s", card_number[-4:] if len(card_number) >= 4 else "????")
+    return valid
 
 
 def validate_pan_bin(pan: str, scheme: str) -> bool:

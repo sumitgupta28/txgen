@@ -18,11 +18,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s | %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%SZ",
+)
+logger = logging.getLogger(__name__)
 
 import asyncpg
 from confluent_kafka import Consumer, KafkaError
@@ -60,6 +68,7 @@ async def _get_rules() -> list[dict]:
     """Fetch active RAG rules from TimescaleDB, cached for RULE_CACHE_TTL seconds."""
     global _rule_cache, _rule_cache_at
     if time.time() - _rule_cache_at < RULE_CACHE_TTL:
+        logger.debug("Rule cache hit | rules=%d age_secs=%.0f", len(_rule_cache), time.time() - _rule_cache_at)
         return _rule_cache
 
     async with _db_pool.acquire() as conn:
@@ -68,6 +77,7 @@ async def _get_rules() -> list[dict]:
         )
     _rule_cache = [dict(r) for r in rows]
     _rule_cache_at = time.time()
+    logger.info("RAG rules refreshed from DB | active_rules=%d", len(_rule_cache))
     return _rule_cache
 
 
@@ -151,15 +161,22 @@ async def _materialise_windows() -> None:
             del _accumulator[k]
 
     if not completed:
+        logger.debug("Window materialisation: no completed windows")
         return
 
+    logger.info("Window materialisation started | completed_windows=%d", len(completed))
     rules = await _get_rules()
+    written = 0
 
     async with _db_pool.acquire() as conn:
         for (acquirer_id, domain, window_minute), messages in completed.items():
             metrics = _compute_metrics(messages)
             window_start = datetime.fromtimestamp(
                 window_minute * WINDOW_SECS, tz=timezone.utc
+            )
+            logger.debug(
+                "Processing window | acquirer=%s domain=%s window=%s messages=%d metrics=%s",
+                acquirer_id, domain, window_start.isoformat(), len(messages), list(metrics.keys()),
             )
 
             for metric_name, value in metrics.items():
@@ -179,6 +196,7 @@ async def _materialise_windows() -> None:
                 )
 
                 if not matching_rule:
+                    logger.debug("No rule for metric | domain=%s metric=%s acquirer=%s — skipping", domain, metric_name, acquirer_id)
                     continue
 
                 rag_status = _classify(value, matching_rule)
@@ -193,12 +211,25 @@ async def _materialise_windows() -> None:
                     acquirer_id if acquirer_id != "*" else None,
                     value, rag_status, f"{WINDOW_SECS}s", window_start
                 )
+                written += 1
 
                 if rag_status == "R":
-                    print(
-                        f"[RAG] RED  {domain}.{metric_name} "
-                        f"acquirer={acquirer_id} value={value:.3f}"
+                    logger.warning(
+                        "RAG RED | domain=%s metric=%s acquirer=%s value=%.3f threshold_red=%s",
+                        domain, metric_name, acquirer_id, value, matching_rule["threshold_red"],
                     )
+                elif rag_status == "A":
+                    logger.info(
+                        "RAG AMBER | domain=%s metric=%s acquirer=%s value=%.3f threshold_amber=%s",
+                        domain, metric_name, acquirer_id, value, matching_rule["threshold_amber"],
+                    )
+                else:
+                    logger.debug(
+                        "RAG GREEN | domain=%s metric=%s acquirer=%s value=%.3f",
+                        domain, metric_name, acquirer_id, value,
+                    )
+
+    logger.info("Window materialisation complete | completed_windows=%d metrics_written=%d", len(completed), written)
 
 
 def _timer_worker() -> None:
@@ -213,14 +244,16 @@ def _timer_worker() -> None:
 def main() -> None:
     global _db_pool
 
-    print("RAG Processor starting...")
+    logger.info("RAG Processor starting | kafka=%s group=%s db=%s window_secs=%d", KAFKA_BROKERS, KAFKA_GROUP_ID, DATABASE_URL.split("@")[-1], WINDOW_SECS)
 
     # Create DB connection pool synchronously before starting the consumer
     _db_pool = asyncio.run(asyncpg.create_pool(DATABASE_URL.replace("+asyncpg", "")))
+    logger.info("TimescaleDB connection pool created")
 
     # Start the window materialisation timer in a daemon thread
     timer = threading.Thread(target=_timer_worker, daemon=True)
     timer.start()
+    logger.info("Window materialisation timer started | interval_secs=%d", WINDOW_SECS)
 
     consumer = Consumer({
         "bootstrap.servers": KAFKA_BROKERS,
@@ -229,9 +262,9 @@ def main() -> None:
         "enable.auto.commit": True,
     })
     consumer.subscribe(TOPICS)
+    logger.info("Kafka consumer subscribed | topics=%s group=%s", TOPICS, KAFKA_GROUP_ID)
 
-    print(f"Consuming from topics: {TOPICS}")
-
+    accumulated = 0
     try:
         while True:
             msg = consumer.poll(timeout=1.0)
@@ -239,7 +272,7 @@ def main() -> None:
                 continue
             if msg.error():
                 if msg.error().code() != KafkaError._PARTITION_EOF:
-                    print(f"Kafka error: {msg.error()}")
+                    logger.error("Kafka consumer error | error=%s", msg.error())
                 continue
 
             try:
@@ -253,17 +286,27 @@ def main() -> None:
                 with _lock:
                     _accumulator[key].append(parsed)
 
+                accumulated += 1
+                logger.debug("Message accumulated | topic=%s acquirer=%s domain=%s stan=%s window=%d", msg.topic(), parsed.acquirer_id, parsed.domain.value, parsed.stan, window_minute)
+
+                if accumulated % 500 == 0:
+                    with _lock:
+                        active_windows = len(_accumulator)
+                    logger.info("RAG accumulator heartbeat | accumulated=%d active_windows=%d", accumulated, active_windows)
+
             except Exception as e:
-                print(f"Failed to process message: {e}")
+                logger.error("Failed to process message | topic=%s partition=%d offset=%d error=%s", msg.topic(), msg.partition(), msg.offset(), e, exc_info=True)
                 # Dead-letter: write to iso_parse_errors table
                 # TODO: implement DLQ write
 
     except KeyboardInterrupt:
-        pass
+        logger.info("RAG Processor shutting down (KeyboardInterrupt)")
     finally:
         consumer.close()
+        logger.info("Kafka consumer closed")
         if _db_pool:
             asyncio.run(_db_pool.close())
+            logger.info("DB pool closed")
 
 
 if __name__ == "__main__":

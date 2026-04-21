@@ -22,6 +22,7 @@ Session lifecycle:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import time
@@ -32,6 +33,8 @@ import redis.asyncio as aioredis
 from fastapi import Cookie, Depends, HTTPException, Response, status
 from jose import JWTError, jwt
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 # ── Configuration (all from environment variables) ───────────────────────────
 
@@ -119,6 +122,16 @@ async def create_session(tokens: dict[str, Any], response: Response) -> UserInfo
     # Filter out Keycloak's internal roles — only expose app-defined roles
     app_roles = [r for r in roles if r in ("admin", "operator", "viewer")]
 
+    keycloak_session_state = payload.get("session_state", "")
+    logger.debug(
+        "JWT decoded | user=%s issuer=%s keycloak_session=%s all_realm_roles=%s app_roles=%s",
+        payload.get("preferred_username", ""),
+        payload.get("iss", ""),
+        keycloak_session_state,
+        roles,
+        app_roles,
+    )
+
     session = SessionData(
         access_token=tokens["access_token"],
         refresh_token=tokens["refresh_token"],
@@ -127,7 +140,7 @@ async def create_session(tokens: dict[str, Any], response: Response) -> UserInfo
         username=payload.get("preferred_username", ""),
         display_name=payload.get("name", payload.get("preferred_username", "")),
         roles=app_roles,
-        keycloak_session=payload.get("session_state", ""),
+        keycloak_session=keycloak_session_state,
     )
 
     # Generate a cryptographically random session ID.
@@ -142,10 +155,22 @@ async def create_session(tokens: dict[str, Any], response: Response) -> UserInfo
         session.model_dump_json(),
     )
 
+    logger.info(
+        "Session created | user=%s display=%r roles=%s "
+        "access_ttl=%ds refresh_ttl=%ds session=%s...",
+        session.username,
+        session.display_name,
+        session.roles,
+        tokens["expires_in"],
+        tokens["refresh_expires_in"],
+        session_id[:8],
+    )
+
     # Set the cookie on the response.
     # HttpOnly: JavaScript cannot read this cookie (XSS protection).
     # SameSite=strict: Cookie not sent on cross-site requests (CSRF protection).
     # Secure should be True in production (HTTPS). False here for local Docker.
+    cookie_secure = os.getenv("COOKIE_SECURE", "false").lower() == "true"
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=session_id,
@@ -153,7 +178,11 @@ async def create_session(tokens: dict[str, Any], response: Response) -> UserInfo
         samesite="strict",
         max_age=int(tokens["refresh_expires_in"]),
         path="/",
-        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        secure=cookie_secure,
+    )
+    logger.debug(
+        "Session cookie set | name=%s httponly=True samesite=strict secure=%s max_age=%ds",
+        SESSION_COOKIE_NAME, cookie_secure, tokens["refresh_expires_in"],
     )
 
     return UserInfo(
@@ -166,23 +195,32 @@ async def create_session(tokens: dict[str, Any], response: Response) -> UserInfo
 async def get_session(session_id: str) -> SessionData:
     """
     Look up a session in Redis by its ID.
-    
+
     If the access token is about to expire, silently refreshes it before
     returning. This means the caller always gets a fresh, valid token
     without needing to think about token lifecycle at all.
     """
+    logger.debug("Session lookup | session=%s...", session_id[:8])
+
     raw = await _redis.get(_session_key(session_id))
     if not raw:
+        logger.warning("Session not found in Redis | session=%s...", session_id[:8])
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session not found or expired. Please log in again.",
         )
 
     session = SessionData.model_validate_json(raw)
+    ttl = session.expires_at - time.time()
+    logger.debug("Session found | user=%s roles=%s access_token_ttl=%.0fs session=%s...", session.username, session.roles, ttl, session_id[:8])
 
     # Proactive refresh: if the access token expires soon, refresh now
     # rather than letting the next request fail with a 401 from Keycloak.
-    if session.expires_at - time.time() < REFRESH_BUFFER_SECS:
+    if ttl < REFRESH_BUFFER_SECS:
+        logger.info(
+            "Access token expiring soon, proactive refresh | user=%s ttl=%.0fs session=%s...",
+            session.username, ttl, session_id[:8],
+        )
         session = await _refresh_session(session_id, session)
 
     return session
@@ -191,11 +229,13 @@ async def get_session(session_id: str) -> SessionData:
 async def _refresh_session(session_id: str, session: SessionData) -> SessionData:
     """
     Exchange the stored refresh token for a new access token.
-    
+
     Called automatically by get_session() — callers never invoke this directly.
     If the refresh token itself has expired, the session is deleted from Redis
     and a 401 is raised, forcing the user to log in again.
     """
+    logger.info("Token refresh attempt | user=%s realm=%s session=%s...", session.username, KEYCLOAK_REALM, session_id[:8])
+
     async with httpx.AsyncClient() as client:
         resp = await client.post(TOKEN_URL, data={
             "grant_type":    "refresh_token",
@@ -206,6 +246,10 @@ async def _refresh_session(session_id: str, session: SessionData) -> SessionData
 
     if resp.status_code != 200:
         # Refresh token expired — cannot silently renew. Must re-login.
+        logger.warning(
+            "Token refresh failed, session invalidated | user=%s status=%d session=%s...",
+            session.username, resp.status_code, session_id[:8],
+        )
         await _redis.delete(_session_key(session_id))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -225,6 +269,10 @@ async def _refresh_session(session_id: str, session: SessionData) -> SessionData
         session.model_dump_json(),
     )
 
+    logger.info(
+        "Token refresh success | user=%s new_access_ttl=%ds new_refresh_ttl=%ds session=%s...",
+        session.username, tokens["expires_in"], tokens["refresh_expires_in"], session_id[:8],
+    )
     return session
 
 
@@ -232,24 +280,39 @@ async def delete_session(session_id: str, session: SessionData) -> None:
     """
     Delete the Redis session and tell Keycloak to invalidate its server-side
     session too. Called on logout.
-    
+
     Without the Keycloak logout call, the Keycloak session would remain active
     even after the Redis session is deleted — a security gap where a stolen
     refresh token could still be exchanged for new access tokens.
     """
+    logger.info("Logout: deleting Redis session | user=%s session=%s...", session.username, session_id[:8])
+
     # Delete from Redis first — even if the Keycloak call fails, the
     # session is gone from our system
     await _redis.delete(_session_key(session_id))
+    logger.debug("Redis session deleted | session=%s...", session_id[:8])
 
     # Tell Keycloak to invalidate the session server-side
+    logger.info(
+        "Logout: notifying Keycloak | user=%s realm=%s keycloak_session=%s url=%s",
+        session.username, KEYCLOAK_REALM, session.keycloak_session, LOGOUT_URL,
+    )
     async with httpx.AsyncClient() as client:
-        await client.post(LOGOUT_URL, data={
+        resp = await client.post(LOGOUT_URL, data={
             "client_id":      CLIENT_ID,
             "client_secret":  CLIENT_SECRET,
             "refresh_token":  session.refresh_token,
         })
+
+    if resp.status_code in (200, 204):
+        logger.info("Keycloak logout confirmed | user=%s status=%d", session.username, resp.status_code)
+    else:
         # Ignore errors here — if Keycloak is down, we still want logout to succeed
         # from the user's perspective (our Redis session is already deleted)
+        logger.warning(
+            "Keycloak logout call failed (ignoring) | user=%s status=%d response=%s",
+            session.username, resp.status_code, resp.text[:200],
+        )
 
 
 # ── FastAPI dependency functions ──────────────────────────────────────────────
@@ -268,10 +331,11 @@ async def get_current_session(
     """
     Base dependency: reads the session cookie and returns the session.
     Returns 401 if no cookie, session not found, or session fully expired.
-    
+
     Add this to any endpoint that just needs authentication (any logged-in user).
     """
     if not session_id:
+        logger.debug("Request rejected: no session cookie present | cookie_name=%s", SESSION_COOKIE_NAME)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
@@ -337,13 +401,15 @@ async def get_ws_session(token: str) -> SessionData:
 async def authenticate_with_keycloak(username: str, password: str) -> dict:
     """
     Exchange username and password for Keycloak tokens using the ROPC grant.
-    
+
     This is a server-to-server call inside Docker — completely invisible
     to the browser. The password is sent over the Docker bridge network,
     not over the public internet.
-    
+
     Raises HTTPException(401) if credentials are invalid.
     """
+    logger.info("Keycloak auth attempt | user=%s realm=%s url=%s", username, KEYCLOAK_REALM, TOKEN_URL)
+
     async with httpx.AsyncClient() as client:
         resp = await client.post(TOKEN_URL, data={
             "grant_type":    "password",
@@ -355,15 +421,21 @@ async def authenticate_with_keycloak(username: str, password: str) -> dict:
         })
 
     if resp.status_code == 401:
+        logger.warning("Keycloak auth failed: invalid credentials | user=%s realm=%s", username, KEYCLOAK_REALM)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid username or password",
         )
 
     if resp.status_code != 200:
+        logger.error(
+            "Keycloak auth failed: service error | user=%s realm=%s status=%d response=%s",
+            username, KEYCLOAK_REALM, resp.status_code, resp.text[:200],
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Authentication service unavailable",
         )
 
+    logger.info("Keycloak auth success | user=%s realm=%s client_id=%s", username, KEYCLOAK_REALM, CLIENT_ID)
     return resp.json()

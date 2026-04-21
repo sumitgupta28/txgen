@@ -14,9 +14,17 @@ Key design choices:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from datetime import datetime, timezone
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s | %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%SZ",
+)
+logger = logging.getLogger(__name__)
 
 from confluent_kafka import Consumer, KafkaError, Producer
 from pymongo import MongoClient
@@ -53,12 +61,12 @@ def handle_auth(parsed, raw_json: dict) -> None:
     pan = parsed.raw_de.get("2", "")
     card = _db.cards.find_one({"pan": pan, "status": "active"})
     if not card:
-        print(f"[WARN] Card not found for PAN ending {pan[-4:]} — skipping")
+        logger.warning("Auth: active card not found | pan_suffix=%s stan=%s acquirer=%s", pan[-4:], parsed.stan, parsed.acquirer_id)
         return
 
     account = _db.accounts.find_one({"_id": card["account_id"]})
     if not account:
-        print(f"[WARN] Account not found for card {card['_id']} — skipping")
+        logger.warning("Auth: account not found | card_id=%s stan=%s", card["_id"], parsed.stan)
         return
 
     txn_doc = {
@@ -96,6 +104,7 @@ def handle_auth(parsed, raw_json: dict) -> None:
                 _db.transactions.insert_one(txn_doc, session=session)
             except DuplicateKeyError:
                 # STAN already exists — this is a Kafka replay, safe to skip
+                logger.debug("Auth: duplicate STAN skipped (Kafka replay) | stan=%s", parsed.stan)
                 return
 
             # Only update balance on approved transactions
@@ -125,6 +134,16 @@ def handle_auth(parsed, raw_json: dict) -> None:
                     "created_at":     datetime.now(timezone.utc),
                 }, session=session)
 
+                logger.debug(
+                    "Auth: approved, balance updated | stan=%s amount_cents=%d account=%s de39=%s",
+                    parsed.stan, parsed.amount, account["_id"], parsed.de39_code,
+                )
+            else:
+                logger.debug(
+                    "Auth: declined, no balance change | stan=%s de39=%s reason=%s",
+                    parsed.stan, parsed.de39_code, parsed.rejection_reason,
+                )
+
 
 # ── Settlement message handler ────────────────────────────────────────────────
 
@@ -133,7 +152,7 @@ def handle_settlement(parsed, raw_json: dict) -> None:
     # Look up the original auth transaction by STAN
     original_txn = _db.transactions.find_one({"stan": parsed.stan})
     if not original_txn:
-        print(f"[WARN] No transaction found for STAN {parsed.stan} — settlement skipped")
+        logger.warning("Settlement: no auth transaction found | stan=%s acquirer=%s", parsed.stan, parsed.acquirer_id)
         return
 
     settlement_doc = {
@@ -155,12 +174,17 @@ def handle_settlement(parsed, raw_json: dict) -> None:
     try:
         result = _db.settlements.insert_one(settlement_doc)
     except DuplicateKeyError:
+        logger.debug("Settlement: duplicate STAN skipped (Kafka replay) | stan=%s", parsed.stan)
         return  # Already settled — Kafka replay, safe to skip
 
     # Update the transaction to reference the settlement
     _db.transactions.update_one(
         {"_id": original_txn["_id"]},
         {"$set": {"settlement_id": result.inserted_id, "status": "settled"}},
+    )
+    logger.debug(
+        "Settlement written | stan=%s settlement_id=%s slo_met=%s confirm_mins=%s",
+        parsed.stan, result.inserted_id, parsed.slo_met, parsed.confirm_mins,
     )
 
 
@@ -170,6 +194,9 @@ def handle_dispute(parsed, raw_json: dict) -> None:
     """Write a dispute request (MTI 0600) to MongoDB."""
     # Find the transaction by RRN
     original_txn = _db.transactions.find_one({"rrn": parsed.rrn})
+
+    if not original_txn:
+        logger.warning("Dispute: no transaction found for RRN | rrn=%s acquirer=%s (writing orphan dispute)", parsed.rrn, parsed.acquirer_id)
 
     dispute_doc = {
         "transaction_id":   original_txn["_id"] if original_txn else None,
@@ -190,7 +217,11 @@ def handle_dispute(parsed, raw_json: dict) -> None:
         "updated_at":       datetime.now(timezone.utc),
     }
 
-    _db.disputes.insert_one(dispute_doc)
+    result = _db.disputes.insert_one(dispute_doc)
+    logger.debug(
+        "Dispute written | rrn=%s dispute_id=%s reason_code=%s has_txn=%s",
+        parsed.rrn, result.inserted_id, dispute_doc["reason_code"], original_txn is not None,
+    )
 
 
 # ── Main consumer loop ────────────────────────────────────────────────────────
@@ -203,7 +234,7 @@ HANDLERS = {
 
 
 def main() -> None:
-    print("MongoDB consumer starting...")
+    logger.info("MongoDB consumer starting | kafka=%s group=%s topics=%s", KAFKA_BROKERS, KAFKA_GROUP_ID, TOPICS)
     consumer = Consumer({
         "bootstrap.servers": KAFKA_BROKERS,
         "group.id":          KAFKA_GROUP_ID,
@@ -211,15 +242,16 @@ def main() -> None:
         "enable.auto.commit": False,   # manual commit after successful write
     })
     consumer.subscribe(TOPICS)
-    print(f"Subscribed to: {TOPICS}")
+    logger.info("Kafka consumer subscribed | topics=%s group=%s", TOPICS, KAFKA_GROUP_ID)
 
+    processed = 0
     while True:
         msg = consumer.poll(timeout=1.0)
         if msg is None:
             continue
         if msg.error():
             if msg.error().code() != KafkaError._PARTITION_EOF:
-                print(f"Kafka error: {msg.error()}")
+                logger.error("Kafka consumer error | error=%s", msg.error())
             continue
 
         topic = msg.topic()
@@ -228,15 +260,21 @@ def main() -> None:
             iso_msg = IsoMessage.model_validate(raw)
             parsed  = map_to_parsed_message(iso_msg)
 
+            logger.debug("Message received | topic=%s mti=%s stan=%s acquirer=%s", topic, parsed.mti, parsed.stan, parsed.acquirer_id)
+
             handler = HANDLERS.get(topic)
             if handler:
                 handler(parsed, raw)
 
             # Commit offset only after successful processing
             consumer.commit(asynchronous=False)
+            processed += 1
+
+            if processed % 500 == 0:
+                logger.info("Consumer heartbeat | processed=%d topic=%s partition=%d offset=%d", processed, topic, msg.partition(), msg.offset())
 
         except Exception as e:
-            print(f"[ERROR] Failed to process {topic} message: {e}")
+            logger.error("Failed to process message | topic=%s partition=%d offset=%d error=%s", topic, msg.partition(), msg.offset(), e, exc_info=True)
             # TODO: write to iso_parse_errors Kafka topic for audit
 
 

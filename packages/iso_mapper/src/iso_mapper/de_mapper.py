@@ -13,10 +13,13 @@ only this module needs updating. All consumers remain untouched.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from models.iso_messages import Domain, IsoMessage, MTI, ParsedMessage, ResultType
 from .de39_codes import DE39_MAP
 from .validators import luhn_check
+
+logger = logging.getLogger(__name__)
 
 
 def map_to_parsed_message(raw: IsoMessage) -> ParsedMessage:
@@ -34,10 +37,13 @@ def map_to_parsed_message(raw: IsoMessage) -> ParsedMessage:
 
     # DE12 (hhmmss) + DE13 (MMDD) → UTC datetime
     # The _meta.generated_at is more reliable for test data — use it if present
+    using_meta_ts = raw.meta.generated_at is not None
     occurred_at = raw.meta.generated_at or _parse_iso_date(
         de.get("12", "000000"),
         de.get("13", "0101"),
     )
+    if not using_meta_ts:
+        logger.debug("Timestamp from DE12/DE13 (no _meta.generated_at) | stan=%s", de.get("11", ""))
 
     # DE39 response code → result_type + rejection_reason
     de39 = de.get("39")
@@ -48,10 +54,14 @@ def map_to_parsed_message(raw: IsoMessage) -> ParsedMessage:
         if mapping:
             result_type = ResultType(mapping["result_type"])
             rejection_reason = mapping.get("rejection_reason")
+        else:
+            logger.warning("Unknown DE39 code | de39=%s stan=%s mti=%s", de39, de.get("11", ""), mti.value)
 
     # DE4 is a 12-digit zero-padded string representing cents (implied decimal)
     # "000000015000" → 15000 cents → $150.00
     amount_str = de.get("4", "0")
+    if not amount_str.isdigit():
+        logger.warning("Non-numeric DE4 amount | de4=%r stan=%s — defaulting to 0", amount_str, de.get("11", ""))
     amount = int(amount_str) if amount_str.isdigit() else 0
 
     # Entry mode DE22: first two digits are the POS entry mode
@@ -63,8 +73,10 @@ def map_to_parsed_message(raw: IsoMessage) -> ParsedMessage:
         "90": "swipe",
     }
     entry_mode = entry_mode_map.get(entry_mode_code, "unknown")
+    if entry_mode == "unknown" and entry_mode_code:
+        logger.debug("Unrecognised DE22 entry mode | de22=%s stan=%s", entry_mode_code, de.get("11", ""))
 
-    return ParsedMessage(
+    parsed = ParsedMessage(
         mti=mti.value,
         domain=domain,
         acquirer_id=raw.meta.acquirer_id,
@@ -87,6 +99,13 @@ def map_to_parsed_message(raw: IsoMessage) -> ParsedMessage:
         sla_met=raw.meta.sla_met,
         raw_de=de,
     )
+
+    logger.debug(
+        "Message mapped | mti=%s domain=%s stan=%s rrn=%s acquirer=%s amount_cents=%d de39=%s result=%s",
+        parsed.mti, parsed.domain.value, parsed.stan, parsed.rrn,
+        parsed.acquirer_id, parsed.amount, de39, result_type.value if result_type else None,
+    )
+    return parsed
 
 
 def _mti_to_domain(mti: MTI) -> Domain:
@@ -116,4 +135,5 @@ def _parse_iso_date(time_str: str, date_str: str) -> datetime:
         second = int(time_str[4:6])
         return datetime(now.year, month, day, hour, minute, second, tzinfo=timezone.utc)
     except (ValueError, IndexError):
+        logger.warning("Failed to parse DE12/DE13 datetime | de12=%r de13=%r — using now()", time_str, date_str)
         return now
