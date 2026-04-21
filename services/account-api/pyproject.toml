@@ -12,9 +12,9 @@ dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
 
-    # Shared packages (installed as editable local packages)
-    "txgen-models @ file:///app/packages/models",
-    "txgen-iso-mapper @ file:///app/packages/iso_mapper",
+    # Shared packages (installed as editable local packages via Dockerfile)
+    "txgen-models",
+    "txgen-iso-mapper",
 
     # Database drivers
     "pymongo>=4.7.0",

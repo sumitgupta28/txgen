@@ -9,8 +9,8 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
-    "txgen-models @ file:///app/packages/models",
-    "txgen-iso-mapper @ file:///app/packages/iso_mapper",
+    "txgen-models",
+    "txgen-iso-mapper",
     "pymongo>=4.7.0",
     "motor>=3.4.0",
     "confluent-kafka>=2.4.0",

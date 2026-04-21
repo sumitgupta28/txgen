@@ -9,7 +9,7 @@ description = "ISO 8583 DE field mapping and validation for TxGen services"
 requires-python = ">=3.12"
 
 dependencies = [
-    "txgen-models @ file:///app/packages/models",
+    "txgen-models",
     "python-jose[cryptography]>=3.3.0",
 ]
 

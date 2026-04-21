@@ -89,7 +89,7 @@ services:
       retries: 10
 
   timescaledb:
-    image: timescale/timescaledb-ha:pg16-latest
+    image: timescale/timescaledb-ha:pg16-all
     ports: ["5432:5432"]
     environment:
       POSTGRES_USER: txgen
@@ -125,9 +125,13 @@ services:
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
-      # dev-mem: in-memory H2 DB — fast startup, no persistence needed
-      # because everything is re-imported from txgen-realm.json anyway
-      KC_DB: dev-mem
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: postgres
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      KC_HOSTNAME_STRICT: false
+      KC_HTTP_ENABLED: true
+      KC_LOG_LEVEL: DEBUG
     volumes:
       - ./infra/keycloak/txgen-realm.json:/opt/keycloak/data/import/txgen-realm.json
     networks: [txgen-net]

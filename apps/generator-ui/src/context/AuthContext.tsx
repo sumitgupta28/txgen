@@ -118,7 +118,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Derived role flags — computed from the user's roles array
   const isAdmin    = user?.roles.includes('admin') ?? false
-  const isOperator = user?.roles.includes('operator') ?? false || isAdmin
+  const isOperator = (user?.roles?.includes('operator') ?? false) || isAdmin;
   const isViewer   = user !== null   // any authenticated user can view
 
   return (
