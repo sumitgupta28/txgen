@@ -43,7 +43,7 @@ from models.iso_messages import Domain
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "kafka:29092")
+KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "kafka:9092")
 MONGO_URL     = os.getenv("MONGO_URL", "mongodb://txgen:txgen@mongodb:27017/banking_db")
 CORS_ORIGINS  = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
 
@@ -120,7 +120,7 @@ Pyctuator(
 
 # Re-use the auth router from account-api — both services expose the same
 # /api/auth/* endpoints so React can call either one for session operations
-from services.account_api.routers.auth import router as auth_router  # noqa
+from src.routers.auth import router as auth_router  # noqa
 # NOTE: In practice, copy the auth router or share via the models package.
 # For clarity here we show it imported from account-api.
 

@@ -27,7 +27,7 @@
       "description": "Confidential client used by FastAPI services to authenticate users via ROPC. Never exposed to the browser.",
       "enabled": true,
       "publicClient": false,
-      "secret": "${KEYCLOAK_CLIENT_SECRET}",
+      "secret": "txgen-secret-local",
       "directAccessGrantsEnabled": true,
       "standardFlowEnabled": false,
       "serviceAccountsEnabled": false,

@@ -93,7 +93,7 @@ Browser ──cookie──▶ FastAPI (BFF) ──tokens──▶ Keycloak
 - **Idempotent writes**: Unique index on STAN prevents duplicate inserts on Kafka replay
 - **Atomic transactions**: MongoDB sessions used for balance + transaction writes
 - **Error isolation**: Parse errors route to `iso_parse_errors` Kafka topic (never lost)
-- **Container networking**: All inter-service URLs use Docker Compose service names (e.g., `kafka:29092`, not `localhost:9092`)
+- **Container networking**: All inter-service URLs use Docker Compose service names (e.g., `kafka:9092`, not `localhost:9092`)
 - **Hot reload**: `docker-compose.override.yml` is auto-merged in dev mode
 
 ### Default Users (Keycloak)

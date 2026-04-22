@@ -35,7 +35,7 @@ from iso_mapper.de_mapper import map_to_parsed_message
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-KAFKA_BROKERS  = os.getenv("KAFKA_BROKERS", "kafka:29092")
+KAFKA_BROKERS  = os.getenv("KAFKA_BROKERS", "kafka:9092")
 KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "mongo-writer-group")
 MONGO_URL      = os.getenv("MONGO_URL", "mongodb://txgen:txgen@mongodb:27017/banking_db")
 

@@ -39,7 +39,7 @@ from iso_mapper.de_mapper import map_to_parsed_message
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-KAFKA_BROKERS  = os.getenv("KAFKA_BROKERS", "kafka:29092")
+KAFKA_BROKERS  = os.getenv("KAFKA_BROKERS", "kafka:9092")
 KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "rag-processor-group")
 DATABASE_URL   = os.getenv("DATABASE_URL", "postgresql://txgen:txgen@timescaledb:5432/txgen")
 WINDOW_SECS    = 60     # 1-minute tumbling windows

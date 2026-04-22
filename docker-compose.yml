@@ -25,49 +25,56 @@
 services:
 
   # ── Infrastructure ──────────────────────────────────────────────────────────
-
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.0
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    networks: [txgen-net]
-    healthcheck:
-      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
-      interval: 10s
-      retries: 5
+  # ══════════════════════════════════════════════════════════
+  # MESSAGE BROKER
+  # ══════════════════════════════════════════════════════════
 
   kafka:
-    image: confluentinc/cp-kafka:7.6.0
-    depends_on:
-      zookeeper: { condition: service_healthy }
-    ports: ["9092:9092"]
+    image: apache/kafka:latest
+    container_name: kafka
+    ports:
+      # 9092 — internal listener (container-to-container, via service name "kafka")
+      # 9094 — external listener (host tools such as kcat, Kafdrop)
+      - "9094:9094"
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      # Two listeners: internal (container-to-container) and external (host tools)
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # Two listeners: INTERNAL for container traffic, EXTERNAL for host tools,
+      # CONTROLLER for KRaft metadata.
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:9094,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_LOG_RETENTION_HOURS: 168        # 7 days
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
     networks: [txgen-net]
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
-      interval: 10s
-      retries: 10
+      test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9094 > /dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
       start_period: 20s
 
-  kafka-ui:
-    image: provectuslabs/kafka-ui:v0.7.2
-    depends_on:
-      kafka: { condition: service_healthy }
-    ports: ["8090:8080"]               # 8090 on host — avoids clash with keycloak:8080
+  kafdrop:
+    image: obsidiandynamics/kafdrop:latest
+    container_name: kafdrop
+    ports:
+      - "9000:9000"
     environment:
-      KAFKA_CLUSTERS_0_NAME: txgen-local
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_BROKERCONNECT: kafka:9092
+      JVM_OPTS: "-Xms32M -Xmx64M"
+    depends_on:
+      kafka:
+        condition: service_healthy
     networks: [txgen-net]
+    restart: unless-stopped
+
+
 
   mongodb:
     image: mongo:7.0
@@ -127,8 +134,8 @@ services:
       KC_DB_URL: jdbc:postgresql://timescaledb:5432/txgen
       KC_DB_USERNAME: txgen
       KC_DB_PASSWORD: txgen
-      KC_HOSTNAME_STRICT: false
-      KC_HTTP_ENABLED: true
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
       KC_LOG_LEVEL: INFO
     volumes:
       - ./infra/keycloak/txgen-realm.json:/opt/keycloak/data/import/txgen-realm.json
@@ -166,7 +173,7 @@ services:
     environment:
       # Database connections use container names — not localhost
       MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
-      KAFKA_BROKERS: kafka:29092
+      KAFKA_BROKERS: kafka:9092
       # Keycloak — container-to-container URL (FastAPI talks to Keycloak)
       # The browser NEVER uses this URL — it only knows about FastAPI
       KEYCLOAK_URL: http://keycloak:8080
@@ -191,7 +198,7 @@ services:
     ports: ["8002:8002"]
     environment:
       MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
-      KAFKA_BROKERS: kafka:29092
+      KAFKA_BROKERS: kafka:9092
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_REALM: txgen
       KEYCLOAK_CLIENT_ID: txgen-backend
@@ -212,7 +219,7 @@ services:
       dockerfile: services/mongo-consumer/Dockerfile
     environment:
       MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
-      KAFKA_BROKERS: kafka:29092
+      KAFKA_BROKERS: kafka:9092
       KAFKA_GROUP_ID: mongo-writer-group
     depends_on:
       mongodb: { condition: service_healthy }
@@ -228,7 +235,7 @@ services:
       dockerfile: services/integrity-checker/Dockerfile
     environment:
       MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
-      KAFKA_BROKERS: kafka:29092
+      KAFKA_BROKERS: kafka:9092
       KAFKA_GROUP_ID: integrity-checker-group
     depends_on:
       mongodb: { condition: service_healthy }
@@ -241,7 +248,7 @@ services:
       context: .
       dockerfile: services/rag-processor/Dockerfile
     environment:
-      KAFKA_BROKERS: kafka:29092
+      KAFKA_BROKERS: kafka:9092
       KAFKA_GROUP_ID: rag-processor-group
       DATABASE_URL: postgresql+asyncpg://txgen:txgen@timescaledb:5432/txgen
     depends_on:
