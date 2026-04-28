@@ -8,7 +8,7 @@
 # No Python, Node.js, or any other runtime needed on the host machine.
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: dev down build test logs psql mongosh kafka-topics \
+.PHONY: dev down build test logs psql mongosh kafka-topics kafka-init kafka-consume \
         seed reset-db export-realm help
 
 # ── Primary commands ──────────────────────────────────────────────────────────
@@ -94,14 +94,18 @@ redis-cli:
 
 # ── Kafka tools ───────────────────────────────────────────────────────────────
 
-## List all Kafka topics
+## List all Kafka topics with partition + replication details
 kafka-topics:
-	docker compose exec kafka kafka-topics \
-	  --bootstrap-server localhost:9092 --list
+	docker compose exec kafka kafka-topics.sh \
+	  --bootstrap-server localhost:9092 --describe
+
+## Re-run topic creation (idempotent — safe to run any time)
+kafka-init:
+	docker compose run --rm kafka-init
 
 ## Consume messages from a topic: make kafka-consume TOPIC=iso-auth
 kafka-consume:
-	docker compose exec kafka kafka-console-consumer \
+	docker compose exec kafka kafka-console-consumer.sh \
 	  --bootstrap-server localhost:9092 \
 	  --topic $(TOPIC) \
 	  --from-beginning \
@@ -141,6 +145,7 @@ help:
 	@echo "  make psql             Open TimescaleDB shell"
 	@echo "  make mongosh          Open MongoDB shell"
 	@echo "  make redis-cli        Open Redis CLI"
-	@echo "  make kafka-topics     List Kafka topics"
+	@echo "  make kafka-topics     List Kafka topics (with partition details)"
+	@echo "  make kafka-init       Re-create topics (idempotent)"
 	@echo "  make export-realm     Export Keycloak realm to JSON"
 	@echo ""

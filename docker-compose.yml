@@ -51,6 +51,9 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Disable broker-side auto-creation — topics are created explicitly by
+      # kafka-init so we never get ghost topics from producer typos.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     networks: [txgen-net]
     restart: unless-stopped
     healthcheck:
@@ -74,7 +77,51 @@ services:
     networks: [txgen-net]
     restart: unless-stopped
 
+  # ── Topic initialisation ─────────────────────────────────────────────────────
+  # One-shot container that creates all required topics before any consumer
+  # starts. Consumers subscribe() immediately on startup — if the topic does
+  # not exist they get "Unknown Topic or Partition" errors even when
+  # auto.create.topics.enable is true, because auto-creation only fires on the
+  # producer side (first produce() call), not on consumer metadata requests.
+  #
+  # Topic design:
+  #   iso-auth / iso-settlement / iso-dispute  — 3 partitions so three consumer
+  #     instances can read in parallel during load tests.
+  #   integrity-events / iso-parse-errors      — 1 partition (low volume).
+  #   retention.ms=86400000 (24 h) keeps dev disk usage reasonable vs the
+  #     default 7-day retention.
 
+  kafka-init:
+    image: apache/kafka:latest
+    container_name: kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        echo "[kafka-init] Creating topics on kafka:9092..."
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic iso-auth       --partitions 3 --replication-factor 1 \
+          --config retention.ms=86400000
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic iso-settlement --partitions 3 --replication-factor 1 \
+          --config retention.ms=86400000
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic iso-dispute    --partitions 3 --replication-factor 1 \
+          --config retention.ms=86400000
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic integrity-events  --partitions 1 --replication-factor 1 \
+          --config retention.ms=86400000
+        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic iso-parse-errors  --partitions 1 --replication-factor 1 \
+          --config retention.ms=86400000
+        echo "[kafka-init] All topics ready:"
+        kafka-topics.sh --bootstrap-server kafka:9092 --list
+    networks: [txgen-net]
+    restart: "no"
 
   mongodb:
     image: mongo:7.0
@@ -189,6 +236,7 @@ services:
       redis:         { condition: service_healthy }
       mongodb:       { condition: service_healthy }
       kafka:         { condition: service_healthy }
+      kafka-init:    { condition: service_completed_successfully }
       db-migrations: { condition: service_completed_successfully }
     networks: [txgen-net]
     restart: unless-stopped
@@ -218,6 +266,7 @@ services:
       redis:         { condition: service_healthy }
       mongodb:       { condition: service_healthy }
       kafka:         { condition: service_healthy }
+      kafka-init:    { condition: service_completed_successfully }
       db-migrations: { condition: service_completed_successfully }
     networks: [txgen-net]
     restart: unless-stopped
@@ -237,8 +286,9 @@ services:
       KAFKA_BROKERS: kafka:9092
       KAFKA_GROUP_ID: mongo-writer-group
     depends_on:
-      mongodb: { condition: service_healthy }
-      kafka:   { condition: service_healthy }
+      mongodb:    { condition: service_healthy }
+      kafka:      { condition: service_healthy }
+      kafka-init: { condition: service_completed_successfully }
       db-migrations: { condition: service_completed_successfully }
     networks: [txgen-net]
     # restart on failure — consumer must always be running
@@ -255,6 +305,7 @@ services:
     depends_on:
       mongodb:       { condition: service_healthy }
       kafka:         { condition: service_healthy }
+      kafka-init:    { condition: service_completed_successfully }
       db-migrations: { condition: service_completed_successfully }
     networks: [txgen-net]
     restart: unless-stopped
@@ -270,6 +321,7 @@ services:
     depends_on:
       timescaledb:   { condition: service_healthy }
       kafka:         { condition: service_healthy }
+      kafka-init:    { condition: service_completed_successfully }
       db-migrations: { condition: service_completed_successfully }
     networks: [txgen-net]
     restart: unless-stopped
