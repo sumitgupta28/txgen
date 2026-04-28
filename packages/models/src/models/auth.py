@@ -115,6 +115,8 @@ async def create_session(tokens: dict[str, Any], response: Response) -> UserInfo
     # and trust the source. Verification happens on every subsequent request.
     payload = jwt.decode(
         tokens["access_token"],
+        key="",
+        algorithms=["RS256"],
         options={"verify_signature": False},
     )
 

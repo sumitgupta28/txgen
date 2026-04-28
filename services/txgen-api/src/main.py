@@ -118,12 +118,6 @@ Pyctuator(
     registration_url=os.getenv("SPRING_BOOT_ADMIN_URL"),
 )
 
-# Re-use the auth router from account-api — both services expose the same
-# /api/auth/* endpoints so React can call either one for session operations
-from src.routers.auth import router as auth_router  # noqa
-# NOTE: In practice, copy the auth router or share via the models package.
-# For clarity here we show it imported from account-api.
-
 router = APIRouter(prefix="/api")
 
 

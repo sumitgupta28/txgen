@@ -14,7 +14,7 @@
 #   8001  account-api    FastAPI — Account Generator
 #   8002  txgen-api      FastAPI — Transaction Generator
 #   8080  keycloak       Identity provider
-#   8090  kafka-ui       Kafka topic browser (8090 avoids conflict with keycloak)
+#   9000  kafdrop        Kafka topic browser
 #   3000  grafana        Dashboards
 #   27017 mongodb        Direct DB access (dev only)
 #   5432  timescaledb    Direct DB access (dev only)
@@ -183,6 +183,9 @@ services:
       REDIS_URL: redis://redis:6379
       # CORS: allow the React dev server to make credentialed requests
       CORS_ORIGINS: "http://localhost:5173"
+      # Pyctuator — use container-addressable URL, not localhost
+      APP_URL: http://account-api:8001
+      SPRING_BOOT_ADMIN_URL: ${SPRING_BOOT_ADMIN_URL:-}
     depends_on:
       keycloak:      { condition: service_healthy }
       redis:         { condition: service_healthy }
@@ -205,6 +208,8 @@ services:
       KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
       REDIS_URL: redis://redis:6379
       CORS_ORIGINS: "http://localhost:5173"
+      APP_URL: http://txgen-api:8002
+      SPRING_BOOT_ADMIN_URL: ${SPRING_BOOT_ADMIN_URL:-}
     depends_on:
       keycloak:      { condition: service_healthy }
       redis:         { condition: service_healthy }
@@ -238,8 +243,9 @@ services:
       KAFKA_BROKERS: kafka:9092
       KAFKA_GROUP_ID: integrity-checker-group
     depends_on:
-      mongodb: { condition: service_healthy }
-      kafka:   { condition: service_healthy }
+      mongodb:       { condition: service_healthy }
+      kafka:         { condition: service_healthy }
+      db-migrations: { condition: service_completed_successfully }
     networks: [txgen-net]
     restart: unless-stopped
 
