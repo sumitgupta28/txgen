@@ -51,6 +51,7 @@ services:
     volumes:
       - ./services/mongo-consumer/src:/app/src
       - ./packages:/app/packages
+    command: ["python", "-m", "src.main"]
 
   integrity-checker:
     build:
@@ -58,6 +59,7 @@ services:
     volumes:
       - ./services/integrity-checker/src:/app/src
       - ./packages:/app/packages
+    command: ["python", "-m", "src.main"]
 
   rag-processor:
     build:
@@ -65,6 +67,7 @@ services:
     volumes:
       - ./services/rag-processor/src:/app/src
       - ./packages:/app/packages
+    command: ["python", "-m", "src.main"]
 
   generator-ui:
     build:

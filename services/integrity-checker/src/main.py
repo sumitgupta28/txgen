@@ -21,32 +21,63 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from pymongo import MongoClient
-
 logging.basicConfig(
-    level=logging.INFO,
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)-8s %(name)s | %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%SZ",
+    stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
+logger.info("integrity-checker process starting | python=%s", sys.version.split()[0])
 
-from confluent_kafka import Consumer, KafkaError, Producer
+try:
+    from pymongo import MongoClient
+    logger.info("pymongo imported successfully")
+except ImportError as e:
+    logger.critical("Failed to import pymongo: %s", e)
+    sys.exit(1)
 
-from models.iso_messages import IsoMessage
-from iso_mapper.de_mapper import map_to_parsed_message
+try:
+    from confluent_kafka import Consumer, KafkaError, Producer
+    logger.info("confluent-kafka imported successfully")
+except ImportError as e:
+    logger.critical("Failed to import confluent_kafka: %s", e)
+    sys.exit(1)
+
+try:
+    from models.iso_messages import IsoMessage
+    from iso_mapper.de_mapper import map_to_parsed_message
+    logger.info("shared packages (models, iso_mapper) imported successfully")
+except ImportError as e:
+    logger.critical("Failed to import shared packages: %s", e)
+    sys.exit(1)
 
 KAFKA_BROKERS  = os.getenv("KAFKA_BROKERS", "kafka:9092")
 KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "integrity-checker-group")
 MONGO_URL      = os.getenv("MONGO_URL", "mongodb://txgen:txgen@mongodb:27017/banking_db")
 
+logger.info("Config | kafka_brokers=%s group=%s mongo_url=%s", KAFKA_BROKERS, KAFKA_GROUP_ID, MONGO_URL)
+
 TOPICS = ["iso-auth", "iso-settlement", "iso-dispute"]
 
-_mongo  = MongoClient(MONGO_URL)
-_db     = _mongo.banking_db
+try:
+    _mongo  = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+    _mongo.admin.command("ping")
+    _db     = _mongo.banking_db
+    logger.info("MongoDB connection verified | url=%s", MONGO_URL)
+except Exception as e:
+    logger.critical("MongoDB connection failed | url=%s error=%s", MONGO_URL, e)
+    sys.exit(1)
 
-_producer = Producer({"bootstrap.servers": KAFKA_BROKERS})
+try:
+    _producer = Producer({"bootstrap.servers": KAFKA_BROKERS})
+    logger.info("Kafka producer created | brokers=%s", KAFKA_BROKERS)
+except Exception as e:
+    logger.critical("Failed to create Kafka producer | brokers=%s error=%s", KAFKA_BROKERS, e)
+    sys.exit(1)
 
 
 def run_rules(topic: str, parsed, raw: dict) -> None:
@@ -151,6 +182,7 @@ def _publish_violation(rule: str, detail: str, parsed) -> None:
 
 
 def main() -> None:
+    logger.info("main() entered — creating Kafka consumer")
     logger.info("Integrity checker starting | kafka=%s group=%s topics=%s", KAFKA_BROKERS, KAFKA_GROUP_ID, TOPICS)
     consumer = Consumer({
         "bootstrap.servers": KAFKA_BROKERS,
