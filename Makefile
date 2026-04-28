@@ -9,7 +9,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 .PHONY: dev down build test logs psql mongosh kafka-topics kafka-init kafka-consume \
-        seed reset-db export-realm help
+        seed reset-db export-realm prune help
 
 # ── Primary commands ──────────────────────────────────────────────────────────
 
@@ -31,6 +31,11 @@ down:
 reset:
 	docker compose down -v
 	@echo "All volumes deleted. Run 'make dev' to start fresh."
+
+## Remove all unused Docker images, containers, networks, and build cache
+prune:
+	docker system prune -f
+	@echo "Docker system pruned."
 
 ## Rebuild all images (needed after changing Dockerfiles or packages/)
 build:
@@ -148,4 +153,5 @@ help:
 	@echo "  make kafka-topics     List Kafka topics (with partition details)"
 	@echo "  make kafka-init       Re-create topics (idempotent)"
 	@echo "  make export-realm     Export Keycloak realm to JSON"
+	@echo "  make prune            docker system prune (free unused images/cache)"
 	@echo ""
