@@ -140,8 +140,8 @@ def _publish_violation(rule: str, detail: str, parsed) -> None:
     logger.warning("Integrity violation published | rule=%s stan=%s acquirer=%s detail=%s", rule, parsed.stan, parsed.acquirer_id, detail)
 
 
-def main() -> None:
-    logger.info("Integrity checker starting | kafka=%s group=%s topics=%s", KAFKA_BROKERS, KAFKA_GROUP_ID, TOPICS)
+async def _async_main() -> None:
+    """Single persistent event loop — motor uses this loop for all DB operations."""
     consumer = Consumer({
         "bootstrap.servers": KAFKA_BROKERS,
         "group.id":          KAFKA_GROUP_ID,
@@ -151,25 +151,37 @@ def main() -> None:
     consumer.subscribe(TOPICS)
     logger.info("Kafka consumer subscribed | topics=%s group=%s", TOPICS, KAFKA_GROUP_ID)
 
+    loop = asyncio.get_running_loop()
     processed = 0
-    while True:
-        msg = consumer.poll(timeout=1.0)
-        if msg is None:
-            continue
-        if msg.error():
-            if msg.error().code() != KafkaError._PARTITION_EOF:
-                logger.error("Kafka consumer error | error=%s", msg.error())
-            continue
-        try:
-            raw    = json.loads(msg.value().decode("utf-8"))
-            iso    = IsoMessage.model_validate(raw)
-            parsed = map_to_parsed_message(iso)
-            asyncio.run(run_rules(msg.topic(), parsed, raw))
-            processed += 1
-            if processed % 500 == 0:
-                logger.info("Integrity checker heartbeat | processed=%d topic=%s", processed, msg.topic())
-        except Exception as e:
-            logger.error("Failed to process message | topic=%s partition=%d offset=%d error=%s", msg.topic(), msg.partition(), msg.offset(), e, exc_info=True)
+    try:
+        while True:
+            # run_in_executor keeps the event loop free while poll blocks for 1s
+            msg = await loop.run_in_executor(None, lambda: consumer.poll(1.0))
+            if msg is None:
+                continue
+            if msg.error():
+                if msg.error().code() != KafkaError._PARTITION_EOF:
+                    logger.error("Kafka consumer error | error=%s", msg.error())
+                continue
+            try:
+                raw    = json.loads(msg.value().decode("utf-8"))
+                iso    = IsoMessage.model_validate(raw)
+                parsed = map_to_parsed_message(iso)
+                await run_rules(msg.topic(), parsed, raw)
+                processed += 1
+                if processed % 500 == 0:
+                    logger.info("Integrity checker heartbeat | processed=%d topic=%s", processed, msg.topic())
+            except Exception as e:
+                logger.error("Failed to process message | topic=%s partition=%d offset=%d error=%s",
+                             msg.topic(), msg.partition(), msg.offset(), e, exc_info=True)
+    finally:
+        consumer.close()
+        logger.info("Integrity checker stopped")
+
+
+def main() -> None:
+    logger.info("Integrity checker starting | kafka=%s group=%s topics=%s", KAFKA_BROKERS, KAFKA_GROUP_ID, TOPICS)
+    asyncio.run(_async_main())
 
 
 if __name__ == "__main__":

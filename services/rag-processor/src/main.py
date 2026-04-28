@@ -6,12 +6,10 @@ windowed metric accumulators per acquirer, evaluates configurable rules,
 and writes R/A/G classifications to TimescaleDB's rag_metrics hypertable.
 
 Architecture:
-  - Main thread: confluent-kafka sync poll loop
-  - Timer thread: fires every 60s to materialise completed windows
-  - Shared state: _accumulator dict protected by threading.Lock
-
-No FastAPI, no HTTP server, no asyncio. This is a focused data pipeline
-service. Simplicity is a feature — it restarts cleanly if it crashes.
+  - Single asyncio event loop (asyncio.run)
+  - Kafka polling via run_in_executor (non-blocking, 1s timeout)
+  - Window timer via asyncio.create_task / asyncio.sleep (no threads needed)
+  - Shared accumulator dict protected by threading.Lock (executor runs in thread)
 """
 
 from __future__ import annotations
@@ -119,8 +117,6 @@ def _compute_metrics(messages: list[ParsedMessage]) -> dict[str, float]:
         approved  = sum(1 for m in messages if m.result_type and m.result_type.value == "APPROVED")
         rejected  = sum(1 for m in messages if m.result_type and m.result_type.value == "REJECTED")
         failed    = sum(1 for m in messages if m.result_type and m.result_type.value == "FAILED")
-        response_times = [m.fraud_score for m in messages
-                          if m.fraud_score is not None]  # using fraud_score as proxy
         return {
             "approval_rate":   approved / total,
             "rejection_rate":  rejected / total,
@@ -145,17 +141,16 @@ def _compute_metrics(messages: list[ParsedMessage]) -> dict[str, float]:
 
 async def _materialise_windows() -> None:
     """
-    Called every WINDOW_SECS by the timer thread.
+    Called every WINDOW_SECS by the async timer task.
     Finds all completed windows, computes metrics, evaluates rules,
     and writes RAG classifications to TimescaleDB.
     """
     current_minute = int(time.time() // WINDOW_SECS)
 
-    # Take a snapshot of completed windows under the lock
     with _lock:
         completed = {
             k: v for k, v in _accumulator.items()
-            if k[2] < current_minute    # window_minute < now → window is complete
+            if k[2] < current_minute
         }
         for k in completed:
             del _accumulator[k]
@@ -180,7 +175,6 @@ async def _materialise_windows() -> None:
             )
 
             for metric_name, value in metrics.items():
-                # Find the most specific matching rule (acquirer-specific > wildcard)
                 matching_rule = next(
                     (r for r in rules
                      if r["domain"] == domain
@@ -232,27 +226,31 @@ async def _materialise_windows() -> None:
     logger.info("Window materialisation complete | completed_windows=%d metrics_written=%d", len(completed), written)
 
 
-def _timer_worker() -> None:
-    """Background thread that triggers window materialisation every WINDOW_SECS."""
+async def _timer_loop() -> None:
+    """Async task that fires window materialisation every WINDOW_SECS."""
     while True:
-        time.sleep(WINDOW_SECS)
-        asyncio.run(_materialise_windows())
+        await asyncio.sleep(WINDOW_SECS)
+        try:
+            await _materialise_windows()
+        except Exception as e:
+            logger.error("Window materialisation error | error=%s", e, exc_info=True)
 
 
-# ── Kafka consumer main loop ──────────────────────────────────────────────────
+# ── Main async entry point ────────────────────────────────────────────────────
 
-def main() -> None:
+async def _async_main() -> None:
     global _db_pool
 
-    logger.info("RAG Processor starting | kafka=%s group=%s db=%s window_secs=%d", KAFKA_BROKERS, KAFKA_GROUP_ID, DATABASE_URL.split("@")[-1], WINDOW_SECS)
+    logger.info("RAG Processor starting | kafka=%s group=%s db=%s window_secs=%d",
+                KAFKA_BROKERS, KAFKA_GROUP_ID, DATABASE_URL.split("@")[-1], WINDOW_SECS)
 
-    # Create DB connection pool synchronously before starting the consumer
-    _db_pool = asyncio.run(asyncpg.create_pool(DATABASE_URL.replace("+asyncpg", "")))
+    # Pool is created inside this event loop — asyncpg requires pool and
+    # all acquire() calls to share the same loop.
+    _db_pool = await asyncpg.create_pool(DATABASE_URL.replace("+asyncpg", ""))
     logger.info("TimescaleDB connection pool created")
 
-    # Start the window materialisation timer in a daemon thread
-    timer = threading.Thread(target=_timer_worker, daemon=True)
-    timer.start()
+    # Timer runs as a sibling task in the same event loop — no threads needed.
+    asyncio.create_task(_timer_loop())
     logger.info("Window materialisation timer started | interval_secs=%d", WINDOW_SECS)
 
     consumer = Consumer({
@@ -264,10 +262,13 @@ def main() -> None:
     consumer.subscribe(TOPICS)
     logger.info("Kafka consumer subscribed | topics=%s group=%s", TOPICS, KAFKA_GROUP_ID)
 
+    loop = asyncio.get_running_loop()
     accumulated = 0
     try:
         while True:
-            msg = consumer.poll(timeout=1.0)
+            # Blocking poll runs in the default executor (thread pool) so the
+            # event loop remains free to run the timer task between polls.
+            msg = await loop.run_in_executor(None, lambda: consumer.poll(1.0))
             if msg is None:
                 continue
             if msg.error():
@@ -287,26 +288,31 @@ def main() -> None:
                     _accumulator[key].append(parsed)
 
                 accumulated += 1
-                logger.debug("Message accumulated | topic=%s acquirer=%s domain=%s stan=%s window=%d", msg.topic(), parsed.acquirer_id, parsed.domain.value, parsed.stan, window_minute)
+                logger.debug("Message accumulated | topic=%s acquirer=%s domain=%s stan=%s window=%d",
+                             msg.topic(), parsed.acquirer_id, parsed.domain.value, parsed.stan, window_minute)
 
                 if accumulated % 500 == 0:
                     with _lock:
                         active_windows = len(_accumulator)
-                    logger.info("RAG accumulator heartbeat | accumulated=%d active_windows=%d", accumulated, active_windows)
+                    logger.info("RAG accumulator heartbeat | accumulated=%d active_windows=%d",
+                                accumulated, active_windows)
 
             except Exception as e:
-                logger.error("Failed to process message | topic=%s partition=%d offset=%d error=%s", msg.topic(), msg.partition(), msg.offset(), e, exc_info=True)
-                # Dead-letter: write to iso_parse_errors table
-                # TODO: implement DLQ write
+                logger.error("Failed to process message | topic=%s partition=%d offset=%d error=%s",
+                             msg.topic(), msg.partition(), msg.offset(), e, exc_info=True)
 
-    except KeyboardInterrupt:
-        logger.info("RAG Processor shutting down (KeyboardInterrupt)")
+    except asyncio.CancelledError:
+        logger.info("RAG Processor shutting down")
     finally:
         consumer.close()
         logger.info("Kafka consumer closed")
         if _db_pool:
-            asyncio.run(_db_pool.close())
+            await _db_pool.close()
             logger.info("DB pool closed")
+
+
+def main() -> None:
+    asyncio.run(_async_main())
 
 
 if __name__ == "__main__":
