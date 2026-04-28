@@ -2,11 +2,18 @@
 # Development overrides — auto-merged by Docker Compose when you run
 # `docker compose up` without specifying a -f flag.
 #
+# WHY THIS FILE EXISTS (and cannot be deleted):
+#   Every Python Dockerfile has two stages: `builder` (deps only, no CMD) and
+#   `runtime` (source baked in, has CMD). In dev we use the `builder` stage so
+#   that bind-mounts provide the source — but the builder stage has NO CMD, so
+#   this file MUST supply the `command` for every Python service. Without it,
+#   containers would start and immediately exit with "no command specified".
+#
 # Key differences from production:
-#   - Python services bind-mount src/ so code changes reload without rebuild
-#   - uvicorn runs with --reload flag
-#   - React runs Vite dev server with HMR instead of nginx
-#   - node_modules stored in anonymous volume (not on host — faster on Mac)
+#   - Python services use `builder` stage + bind-mount src/ (no rebuild needed)
+#   - uvicorn runs with --reload flag (FastAPI services only)
+#   - React runs Vite dev server with HMR (bind-mount + anonymous node_modules)
+#   - Kafka consumers restart via `docker compose restart <name>` on code change
 #
 # When you edit a Python file → uvicorn detects the change → restarts in ~1s
 # When you edit a React file  → Vite HMR updates the browser in milliseconds
@@ -70,8 +77,7 @@ services:
     command: ["python", "-m", "src.main"]
 
   generator-ui:
-    build:
-      target: dev
+    # build.target: dev is already set in docker-compose.yml — no override needed here
     volumes:
       # Entire UI mounted — Vite watches for changes
       - ./apps/generator-ui:/app

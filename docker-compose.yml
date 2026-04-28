@@ -146,8 +146,9 @@ services:
       # /realms/txgen must exist before FastAPI services try to use it
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/realms/txgen > /dev/null"]
       interval: 10s
-      retries: 15
-      start_period: 40s      # Keycloak JVM startup takes longer than other services
+      timeout: 5s
+      retries: 12
+      start_period: 60s      # Keycloak JVM + realm import needs ~60 s on first boot
 
   # ── One-shot migration container ─────────────────────────────────────────────
 
@@ -183,9 +184,6 @@ services:
       REDIS_URL: redis://redis:6379
       # CORS: allow the React dev server to make credentialed requests
       CORS_ORIGINS: "http://localhost:5173"
-      # Pyctuator — use container-addressable URL, not localhost
-      APP_URL: http://account-api:8001
-      SPRING_BOOT_ADMIN_URL: ${SPRING_BOOT_ADMIN_URL:-}
     depends_on:
       keycloak:      { condition: service_healthy }
       redis:         { condition: service_healthy }
@@ -193,6 +191,13 @@ services:
       kafka:         { condition: service_healthy }
       db-migrations: { condition: service_completed_successfully }
     networks: [txgen-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   txgen-api:
     build:
@@ -208,8 +213,6 @@ services:
       KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
       REDIS_URL: redis://redis:6379
       CORS_ORIGINS: "http://localhost:5173"
-      APP_URL: http://txgen-api:8002
-      SPRING_BOOT_ADMIN_URL: ${SPRING_BOOT_ADMIN_URL:-}
     depends_on:
       keycloak:      { condition: service_healthy }
       redis:         { condition: service_healthy }
@@ -217,6 +220,13 @@ services:
       kafka:         { condition: service_healthy }
       db-migrations: { condition: service_completed_successfully }
     networks: [txgen-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   mongo-consumer:
     build:
@@ -275,9 +285,10 @@ services:
       VITE_ACCOUNT_API_URL: http://localhost:8001
       VITE_TXGEN_API_URL: http://localhost:8002
     depends_on:
-      - account-api
-      - txgen-api
+      account-api: { condition: service_healthy }
+      txgen-api:   { condition: service_healthy }
     networks: [txgen-net]
+    restart: unless-stopped
 
   grafana:
     image: grafana/grafana:11.0.0

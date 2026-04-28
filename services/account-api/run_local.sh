@@ -44,8 +44,6 @@ export MONGO_URL="${MONGO_URL:-mongodb://txgen:txgen@localhost:27017/banking_db}
 export KAFKA_BROKERS="${KAFKA_BROKERS:-localhost:9092}"
 
 export CORS_ORIGINS="${CORS_ORIGINS:-http://localhost:5173}"
-export APP_URL="${APP_URL:-http://localhost:8001}"
-export SPRING_BOOT_ADMIN_URL="${SPRING_BOOT_ADMIN_URL:-}"
 
 export PYTHONUNBUFFERED=1
 

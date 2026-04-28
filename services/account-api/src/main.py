@@ -16,7 +16,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pyctuator.pyctuator import Pyctuator
 
 from .routers import auth, seed
 
@@ -83,7 +82,7 @@ app.add_middleware(
 async def log_requests(request: Request, call_next):
     start = time.perf_counter()
     response = await call_next(request)
-    if request.url.path not in ("/health", "/actuator/health"):
+    if request.url.path != "/health":
         duration_ms = (time.perf_counter() - start) * 1000
         logger.info(
             "HTTP %s %s %d %.0fms | client=%s",
@@ -92,17 +91,6 @@ async def log_requests(request: Request, call_next):
         )
     return response
 
-
-# ── Actuator ─────────────────────────────────────────────────────────────────
-
-_app_url = os.getenv("APP_URL", "http://localhost:8001")
-Pyctuator(
-    app=app,
-    app_name="TxGen Account API",
-    app_url=_app_url,
-    pyctuator_endpoint_url=f"{_app_url}/actuator",
-    registration_url=os.getenv("SPRING_BOOT_ADMIN_URL"),
-)
 
 # ── Routers ───────────────────────────────────────────────────────────────────
 

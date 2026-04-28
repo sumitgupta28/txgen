@@ -21,7 +21,6 @@ PORT="${PORT:-8002}"
 export KAFKA_BROKERS="${KAFKA_BROKERS:-localhost:9092}"
 export MONGO_URL="${MONGO_URL:-mongodb://txgen:txgen@localhost:27017/banking_db}"
 export CORS_ORIGINS="${CORS_ORIGINS:-http://localhost:5173}"
-export APP_URL="${APP_URL:-http://localhost:$PORT}"
 export LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -75,7 +74,6 @@ log "Starting txgen-api"
 log "  KAFKA_BROKERS : $KAFKA_BROKERS"
 log "  MONGO_URL     : $MONGO_URL"
 log "  CORS_ORIGINS  : $CORS_ORIGINS"
-log "  APP_URL       : $APP_URL"
 log "  Listening on  : http://0.0.0.0:$PORT"
 echo
 
