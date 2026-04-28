@@ -172,7 +172,7 @@ services:
     ports: ["8001:8001"]
     environment:
       # Database connections use container names — not localhost
-      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
+      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db?authSource=admin
       KAFKA_BROKERS: kafka:9092
       # Keycloak — container-to-container URL (FastAPI talks to Keycloak)
       # The browser NEVER uses this URL — it only knows about FastAPI
@@ -200,7 +200,7 @@ services:
       dockerfile: services/txgen-api/Dockerfile
     ports: ["8002:8002"]
     environment:
-      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
+      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db?authSource=admin
       KAFKA_BROKERS: kafka:9092
       KEYCLOAK_URL: http://keycloak:8080
       KEYCLOAK_REALM: txgen
@@ -223,7 +223,7 @@ services:
       context: .
       dockerfile: services/mongo-consumer/Dockerfile
     environment:
-      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
+      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db?authSource=admin
       KAFKA_BROKERS: kafka:9092
       KAFKA_GROUP_ID: mongo-writer-group
     depends_on:
@@ -239,7 +239,7 @@ services:
       context: .
       dockerfile: services/integrity-checker/Dockerfile
     environment:
-      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db
+      MONGO_URL: mongodb://txgen:txgen@mongodb:27017/banking_db?authSource=admin
       KAFKA_BROKERS: kafka:9092
       KAFKA_GROUP_ID: integrity-checker-group
     depends_on:

@@ -57,7 +57,7 @@ except ImportError as e:
 
 KAFKA_BROKERS  = os.getenv("KAFKA_BROKERS", "kafka:9092")
 KAFKA_GROUP_ID = os.getenv("KAFKA_GROUP_ID", "integrity-checker-group")
-MONGO_URL      = os.getenv("MONGO_URL", "mongodb://txgen:txgen@mongodb:27017/banking_db")
+MONGO_URL      = os.getenv("MONGO_URL", "mongodb://txgen:txgen@mongodb:27017/banking_db?authSource=admin")
 
 logger.info("Config | kafka_brokers=%s group=%s mongo_url=%s", KAFKA_BROKERS, KAFKA_GROUP_ID, MONGO_URL)
 

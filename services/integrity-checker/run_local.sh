@@ -17,7 +17,7 @@ VENV="$SERVICE_DIR/.venv"
 # ── Environment ────────────────────────────────────────────────────────────────
 export KAFKA_BROKERS="${KAFKA_BROKERS:-localhost:9092}"
 export KAFKA_GROUP_ID="${KAFKA_GROUP_ID:-integrity-checker-group}"
-export MONGO_URL="${MONGO_URL:-mongodb://txgen:txgen@localhost:27017/banking_db}"
+export MONGO_URL="${MONGO_URL:-mongodb://txgen:txgen@localhost:27017/banking_db?authSource=admin}"
 export LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
