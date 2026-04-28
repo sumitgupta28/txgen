@@ -18,12 +18,12 @@ The eight rules map directly to the integrity design from the architecture:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import motor.motor_asyncio as motor
+from pymongo import MongoClient
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,6 +31,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%dT%H:%M:%SZ",
 )
 logger = logging.getLogger(__name__)
+
 from confluent_kafka import Consumer, KafkaError, Producer
 
 from models.iso_messages import IsoMessage
@@ -42,39 +43,47 @@ MONGO_URL      = os.getenv("MONGO_URL", "mongodb://txgen:txgen@mongodb:27017/ban
 
 TOPICS = ["iso-auth", "iso-settlement", "iso-dispute"]
 
-_client = motor.AsyncIOMotorClient(MONGO_URL)
-_db     = _client.banking_db
+_mongo  = MongoClient(MONGO_URL)
+_db     = _mongo.banking_db
 
 _producer = Producer({"bootstrap.servers": KAFKA_BROKERS})
 
 
-async def run_rules(topic: str, parsed, raw: dict) -> None:
-    """Run all applicable integrity rules for the given message."""
+def run_rules(topic: str, parsed, raw: dict) -> None:
+    """Run all applicable integrity rules in parallel for the given message."""
     logger.debug("Running integrity rules | topic=%s stan=%s acquirer=%s", topic, parsed.stan, parsed.acquirer_id)
 
-    results = await asyncio.gather(
-        _rule_1_orphan_check(parsed) if topic == "iso-auth" else asyncio.sleep(0),
-        _rule_2_settlement_ref(parsed) if topic == "iso-settlement" else asyncio.sleep(0),
-        _rule_3_dispute_ref(parsed) if topic == "iso-dispute" else asyncio.sleep(0),
-        _rule_5_overdraft(parsed) if topic == "iso-auth" else asyncio.sleep(0),
-        return_exceptions=True,
-    )
+    rule_fns = []
+    if topic == "iso-auth":
+        rule_fns = [
+            lambda: _rule_1_orphan_check(parsed),
+            lambda: _rule_5_overdraft(parsed),
+        ]
+    elif topic == "iso-settlement":
+        rule_fns = [lambda: _rule_2_settlement_ref(parsed)]
+    elif topic == "iso-dispute":
+        rule_fns = [lambda: _rule_3_dispute_ref(parsed)]
 
     violations = 0
-    for result in results:
-        if isinstance(result, Exception):
-            logger.error("Rule raised exception | stan=%s error=%s", parsed.stan, result, exc_info=result)
-        elif isinstance(result, dict) and not result.get("pass"):
-            violations += 1
-            _publish_violation(result["rule"], result["detail"], parsed)
+    with ThreadPoolExecutor(max_workers=len(rule_fns) or 1) as pool:
+        futures = {pool.submit(fn): fn for fn in rule_fns}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+            except Exception as e:
+                logger.error("Rule raised exception | stan=%s error=%s", parsed.stan, e, exc_info=True)
+                continue
+            if isinstance(result, dict) and not result.get("pass"):
+                violations += 1
+                _publish_violation(result["rule"], result["detail"], parsed)
 
     if violations == 0:
         logger.debug("All rules passed | topic=%s stan=%s", topic, parsed.stan)
 
 
-async def _rule_1_orphan_check(parsed) -> dict:
+def _rule_1_orphan_check(parsed) -> dict:
     pan  = parsed.raw_de.get("2", "")
-    card = await _db.cards.find_one({"pan": pan, "status": "active"})
+    card = _db.cards.find_one({"pan": pan, "status": "active"})
     if not card:
         logger.debug("Rule 1 FAIL | stan=%s pan_suffix=%s", parsed.stan, pan[-4:])
         return {"pass": False, "rule": "ORPHAN_TRANSACTION",
@@ -83,8 +92,8 @@ async def _rule_1_orphan_check(parsed) -> dict:
     return {"pass": True}
 
 
-async def _rule_2_settlement_ref(parsed) -> dict:
-    txn = await _db.transactions.find_one({"stan": parsed.stan})
+def _rule_2_settlement_ref(parsed) -> dict:
+    txn = _db.transactions.find_one({"stan": parsed.stan})
     if not txn:
         logger.debug("Rule 2 FAIL: no transaction | stan=%s", parsed.stan)
         return {"pass": False, "rule": "INVALID_SETTLEMENT_REF",
@@ -97,8 +106,8 @@ async def _rule_2_settlement_ref(parsed) -> dict:
     return {"pass": True}
 
 
-async def _rule_3_dispute_ref(parsed) -> dict:
-    txn = await _db.transactions.find_one({"rrn": parsed.rrn})
+def _rule_3_dispute_ref(parsed) -> dict:
+    txn = _db.transactions.find_one({"rrn": parsed.rrn})
     if not txn or not txn.get("settlement_id"):
         logger.debug("Rule 3 FAIL: unsettled transaction | rrn=%s has_txn=%s", parsed.rrn, txn is not None)
         return {"pass": False, "rule": "PREMATURE_DISPUTE",
@@ -107,14 +116,14 @@ async def _rule_3_dispute_ref(parsed) -> dict:
     return {"pass": True}
 
 
-async def _rule_5_overdraft(parsed) -> dict:
+def _rule_5_overdraft(parsed) -> dict:
     if not parsed.result_type or parsed.result_type.value != "APPROVED":
         return {"pass": True}
     pan  = parsed.raw_de.get("2", "")
-    card = await _db.cards.find_one({"pan": pan})
+    card = _db.cards.find_one({"pan": pan})
     if not card:
         return {"pass": True}
-    acc  = await _db.accounts.find_one({"_id": card["account_id"]})
+    acc  = _db.accounts.find_one({"_id": card["account_id"]})
     if not acc:
         return {"pass": True}
     new_bal = acc["balance"]["available"] - parsed.amount
@@ -137,11 +146,12 @@ def _publish_violation(rule: str, detail: str, parsed) -> None:
     }).encode("utf-8")
     _producer.produce("integrity-events", value=event)
     _producer.poll(0)
-    logger.warning("Integrity violation published | rule=%s stan=%s acquirer=%s detail=%s", rule, parsed.stan, parsed.acquirer_id, detail)
+    logger.warning("Integrity violation published | rule=%s stan=%s acquirer=%s detail=%s",
+                   rule, parsed.stan, parsed.acquirer_id, detail)
 
 
-async def _async_main() -> None:
-    """Single persistent event loop — motor uses this loop for all DB operations."""
+def main() -> None:
+    logger.info("Integrity checker starting | kafka=%s group=%s topics=%s", KAFKA_BROKERS, KAFKA_GROUP_ID, TOPICS)
     consumer = Consumer({
         "bootstrap.servers": KAFKA_BROKERS,
         "group.id":          KAFKA_GROUP_ID,
@@ -151,12 +161,10 @@ async def _async_main() -> None:
     consumer.subscribe(TOPICS)
     logger.info("Kafka consumer subscribed | topics=%s group=%s", TOPICS, KAFKA_GROUP_ID)
 
-    loop = asyncio.get_running_loop()
     processed = 0
     try:
         while True:
-            # run_in_executor keeps the event loop free while poll blocks for 1s
-            msg = await loop.run_in_executor(None, lambda: consumer.poll(1.0))
+            msg = consumer.poll(timeout=1.0)
             if msg is None:
                 continue
             if msg.error():
@@ -167,7 +175,7 @@ async def _async_main() -> None:
                 raw    = json.loads(msg.value().decode("utf-8"))
                 iso    = IsoMessage.model_validate(raw)
                 parsed = map_to_parsed_message(iso)
-                await run_rules(msg.topic(), parsed, raw)
+                run_rules(msg.topic(), parsed, raw)
                 processed += 1
                 if processed % 500 == 0:
                     logger.info("Integrity checker heartbeat | processed=%d topic=%s", processed, msg.topic())
@@ -177,11 +185,6 @@ async def _async_main() -> None:
     finally:
         consumer.close()
         logger.info("Integrity checker stopped")
-
-
-def main() -> None:
-    logger.info("Integrity checker starting | kafka=%s group=%s topics=%s", KAFKA_BROKERS, KAFKA_GROUP_ID, TOPICS)
-    asyncio.run(_async_main())
 
 
 if __name__ == "__main__":
