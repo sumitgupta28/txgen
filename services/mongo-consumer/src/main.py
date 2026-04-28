@@ -19,12 +19,14 @@ import os
 import time
 from datetime import datetime, timezone
 
+_log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_log_level,
     format="%(asctime)s %(levelname)-8s %(name)s | %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%SZ",
 )
 logger = logging.getLogger(__name__)
+logger.info("mongo-consumer process starting | log_level=%s", os.getenv("LOG_LEVEL", "INFO").upper())
 
 from confluent_kafka import Consumer, KafkaError, Producer
 from pymongo import MongoClient
@@ -98,6 +100,7 @@ def handle_auth(parsed, raw_json: dict) -> None:
         "updated_at":       datetime.now(timezone.utc),
     }
 
+    t0 = time.monotonic()
     with _mongo.start_session() as session:
         with session.start_transaction():
             try:
@@ -134,10 +137,13 @@ def handle_auth(parsed, raw_json: dict) -> None:
                     "created_at":     datetime.now(timezone.utc),
                 }, session=session)
 
+                write_ms = (time.monotonic() - t0) * 1000
                 logger.debug(
-                    "Auth: approved, balance updated | stan=%s amount_cents=%d account=%s de39=%s",
-                    parsed.stan, parsed.amount, account["_id"], parsed.de39_code,
+                    "Auth: approved, balance updated | stan=%s amount_cents=%d account=%s de39=%s write_ms=%.1f",
+                    parsed.stan, parsed.amount, account["_id"], parsed.de39_code, write_ms,
                 )
+                if write_ms > 200:
+                    logger.warning("Auth: slow MongoDB write | stan=%s write_ms=%.1f", parsed.stan, write_ms)
             else:
                 logger.debug(
                     "Auth: declined, no balance change | stan=%s de39=%s reason=%s",

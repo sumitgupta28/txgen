@@ -23,8 +23,9 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
+_log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_log_level,
     format="%(asctime)s %(levelname)-8s %(name)s | %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%SZ",
 )

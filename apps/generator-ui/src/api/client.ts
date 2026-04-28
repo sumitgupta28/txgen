@@ -22,6 +22,9 @@
  */
 
 import axios, { type AxiosInstance } from 'axios'
+import { createLogger } from '../utils/logger'
+
+const log = createLogger('api')
 
 /**
  * Creates a pre-configured axios instance for a FastAPI service.
@@ -37,8 +40,15 @@ function createApiClient(baseURL: string): AxiosInstance {
     },
   })
 
+  // Log outgoing requests in dev so engineers can trace which calls fired.
+  client.interceptors.request.use((config) => {
+    (config as { _sentAt?: number })._sentAt = Date.now()
+    log.debug('%s %s', config.method?.toUpperCase(), config.url)
+    return config
+  })
+
   /**
-   * Response interceptor: the only auth-related code React needs.
+   * Response interceptor: logs timing + handles auth expiry.
    *
    * When FastAPI returns 401 (session expired, cookie missing, or tampered),
    * we dispatch a custom event. The AuthContext listens for this event and
@@ -49,12 +59,29 @@ function createApiClient(baseURL: string): AxiosInstance {
    * call React state setters directly.
    */
   client.interceptors.response.use(
-    (response) => response,
+    (response) => {
+      const sentAt = (response.config as { _sentAt?: number })._sentAt
+      const ms = sentAt ? Date.now() - sentAt : -1
+      log.debug('%s %s %d %dms', response.config.method?.toUpperCase(), response.config.url, response.status, ms)
+      return response
+    },
     (error) => {
-      if (error.response?.status === 401) {
-        // Notify AuthContext that the session has expired
+      const config = error.config ?? {}
+      const sentAt = (config as { _sentAt?: number })._sentAt
+      const ms = sentAt ? Date.now() - sentAt : -1
+      const status: number = error.response?.status ?? 0
+
+      if (status === 401) {
+        log.info('session expired | url=%s — dispatching auth:session-expired', config.url)
         window.dispatchEvent(new CustomEvent('auth:session-expired'))
+      } else if (status >= 500) {
+        log.error('server error | %s %s %d %dms', config.method?.toUpperCase(), config.url, status, ms)
+      } else if (status >= 400) {
+        log.warn('client error | %s %s %d %dms', config.method?.toUpperCase(), config.url, status, ms)
+      } else {
+        log.error('request failed (no response) | %s %s error=%s', config.method?.toUpperCase(), config.url, error.message)
       }
+
       return Promise.reject(error)
     }
   )

@@ -17,8 +17,9 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+_log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_log_level,
     format="%(asctime)s %(levelname)-8s %(name)s | %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%SZ",
 )
@@ -27,12 +28,13 @@ logger = logging.getLogger(__name__)
 from confluent_kafka import Producer
 from fastapi import (
     APIRouter,
+    Depends,
     FastAPI,
     Query,
+    Request,
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi import Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pyctuator.pyctuator import Pyctuator
 from pymongo import MongoClient
@@ -106,6 +108,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["Content-Type", "Accept"],
 )
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.perf_counter()
+    response = await call_next(request)
+    if request.url.path not in ("/health", "/actuator/health"):
+        duration_ms = (time.perf_counter() - start) * 1000
+        logger.info(
+            "HTTP %s %s %d %.0fms | client=%s",
+            request.method, request.url.path, response.status_code,
+            duration_ms, request.client.host if request.client else "unknown",
+        )
+    return response
+
 
 # ── Actuator ─────────────────────────────────────────────────────────────────
 

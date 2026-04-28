@@ -30,6 +30,9 @@ import {
   useState,
 } from 'react'
 import { accountApi } from '../api/client'
+import { createLogger } from '../utils/logger'
+
+const log = createLogger('AuthContext')
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -68,10 +71,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    * If 200 is returned → session exists → user goes straight to the app.
    */
   useEffect(() => {
+    log.debug('checking existing session via /api/auth/me')
     accountApi
       .get<User>('/api/auth/me')
-      .then((res) => setUser(mapUser(res.data)))
-      .catch(() => setUser(null))      // 401 is expected — not an error
+      .then((res) => {
+        log.info('session restored | user=%s roles=%s', res.data.username, res.data.roles?.join(','))
+        setUser(mapUser(res.data))
+      })
+      .catch(() => {
+        log.debug('no active session — showing login page')
+        setUser(null)
+      })
       .finally(() => setLoading(false))
   }, [])
 
@@ -81,40 +91,31 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    * the React user state so the login page is shown.
    */
   useEffect(() => {
-    const handleExpiry = () => setUser(null)
+    const handleExpiry = () => {
+      log.warn('session expired event received — clearing user state')
+      setUser(null)
+    }
     window.addEventListener('auth:session-expired', handleExpiry)
     return () => window.removeEventListener('auth:session-expired', handleExpiry)
   }, [])
 
   const login = useCallback(async (username: string, password: string) => {
-    /**
-     * POST credentials to FastAPI. FastAPI calls Keycloak server-side,
-     * stores tokens in Redis, and sets the HttpOnly cookie via Set-Cookie header.
-     *
-     * The `withCredentials: true` on the axios client ensures the browser
-     * accepts and stores the Set-Cookie header from the cross-origin FastAPI response.
-     *
-     * If credentials are wrong, FastAPI returns 401 and axios throws — the
-     * LoginPage catches this and shows the error message.
-     */
+    log.info('login attempt | user=%s', username)
     const res = await accountApi.post<User>('/api/auth/login', {
       username,
       password,
     })
+    log.info('login success | user=%s roles=%s', res.data.username, res.data.roles?.join(','))
     setUser(mapUser(res.data))
   }, [])
 
   const logout = useCallback(async () => {
-    /**
-     * POST to /api/auth/logout. FastAPI deletes the Redis session, calls
-     * Keycloak's logout endpoint, and responds with Set-Cookie: session=; Max-Age=0
-     * which tells the browser to immediately discard the session cookie.
-     */
-    await accountApi.post('/api/auth/logout').catch(() => {
-      // Even if the request fails (e.g. network error), clear local state
+    log.info('logout | user=%s', user?.username ?? 'unknown')
+    await accountApi.post('/api/auth/logout').catch((err) => {
+      log.warn('logout request failed (clearing local state anyway) | error=%s', err?.message)
     })
     setUser(null)
-  }, [])
+  }, [user])
 
   // Derived role flags — computed from the user's roles array
   const isAdmin    = user?.roles.includes('admin') ?? false
