@@ -127,3 +127,8 @@ txgen/
 
 To add users: edit `infra/keycloak/txgen-realm.json` and run `make reset && make dev`,
 or add them manually in the Keycloak admin UI and run `make export-realm` to persist.
+
+
+```
+ type="LOGIN_ERROR", realmId="52fa5d5f-8938-4c5d-959c-46b89ccb9ed6", clientId="txgen-backend", userId="null", ipAddress="172.23.0.13", error="user_not_found", auth_method="openid-connect", grant_type="password", client_auth_method="client-secret", username="bob@txgen.local"
+```
