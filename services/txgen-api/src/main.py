@@ -44,7 +44,7 @@ from models.iso_messages import Domain
 # ── Config ────────────────────────────────────────────────────────────────────
 
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "kafka:9092")
-MONGO_URL     = os.getenv("MONGO_URL", "mongodb://txgen:txgen@mongodb:27017/banking_db")
+MONGO_URL      = os.getenv("MONGO_URL", "mongodb://txgen:txgen@mongodb:27017/banking_db?authSource=admin")
 CORS_ORIGINS  = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
 
 # ── Shared state ──────────────────────────────────────────────────────────────
